@@ -75,6 +75,7 @@
         <button class="tab active" data-tab="overall">Overall</button>
         <button class="tab" data-tab="sessions">Sessions</button>
         <button class="tab" data-tab="events">Events</button>
+        <button class="tab" data-tab="funnels">Funnels</button>
         <button class="tab" data-tab="connection">Connection</button>
       </nav>
 
@@ -106,6 +107,10 @@
               <h3>Feedback insights</h3>
               <button id="summarize-btn" class="btn primary tiny">Summarize feedback</button>
             </div>
+            <div class="fb-keyword-input-wrap">
+              <input id="fb-keywords" class="filter-input" placeholder="Add custom keyword tags (press Enter or comma)..." />
+              <div id="fb-tag-list" class="fb-tag-list"></div>
+            </div>
             <div id="summary-out" class="summary-out">
               <p class="muted">Crunching feedback…</p>
             </div>
@@ -132,16 +137,22 @@
         <div class="sess-layout">
           <aside class="tile sess-list-card">
             <div class="tile-head">
-              <h3>Sessions</h3>
+              <h3>Sessions <span class="live-flag">● live</span></h3>
               <span class="sess-sub" id="sess-count"></span>
             </div>
-            <div class="sess-dropdown-filters">
-              <select id="sess-filter-server" class="filter-select" aria-label="Filter by server">
-                <option value="">All servers</option>
-              </select>
-              <select id="sess-filter-version" class="filter-select" aria-label="Filter by version">
-                <option value="">All versions</option>
-              </select>
+            <div class="sess-card-filters">
+              <input id="sess-search" class="filter-input sess-search" placeholder="Search sessions, players, servers, region…" />
+              <div class="sess-dropdown-filters">
+                <select id="sess-filter-player" class="filter-select" aria-label="Filter by player">
+                  <option value="">All players</option>
+                </select>
+                <select id="sess-filter-server" class="filter-select" aria-label="Filter by server">
+                  <option value="">All servers</option>
+                </select>
+                <select id="sess-filter-version" class="filter-select" aria-label="Filter by version">
+                  <option value="">All versions</option>
+                </select>
+              </div>
             </div>
             <div class="sess-legend">
               <button class="sess-filter active" data-sfilter="all" type="button">All</button>
@@ -175,26 +186,25 @@
           <div class="tile-head">
             <h3>Events</h3>
             <div class="head-actions">
-              <span class="live-flag" id="live-flag">● live</span>
-              <div class="cols-wrap">
-                <button id="cols-btn" class="btn ghost tiny" aria-haspopup="true" aria-expanded="false">⚙ Columns</button>
-                <div id="cols-menu" class="cols-menu hidden" role="menu">
-                  <label><input type="checkbox" data-col="time" checked /> Time</label>
-                  <label><input type="checkbox" data-col="player" checked /> Player</label>
-                  <label><input type="checkbox" data-col="server" checked /> Server ID</label>
-                  <label><input type="checkbox" data-col="data" checked /> Data</label>
-                </div>
-              </div>
+              <span class="live-flag" id="live-flag">● live <span class="dot-sep">•</span> <span class="filter-count" id="filter-count"></span></span>
             </div>
           </div>
           <div class="filters">
-            <input id="filter-event" class="filter-input" placeholder="Search events…" />
+            <input id="filter-event" class="filter-input" placeholder="Search events, players, servers, data…" />
             <label class="date-filter">From <input id="filter-from" type="date" /></label>
             <label class="date-filter">To <input id="filter-to" type="date" /></label>
             <select id="filter-player" class="filter-select" aria-label="Filter by player"></select>
             <select id="filter-server" class="filter-select" aria-label="Filter by server"></select>
+            <div class="cols-wrap">
+              <button id="cols-btn" class="btn ghost tiny" aria-haspopup="true" aria-expanded="false">⚙ Columns</button>
+              <div id="cols-menu" class="cols-menu hidden" role="menu">
+                <label><input type="checkbox" data-col="time" checked /> Time</label>
+                <label><input type="checkbox" data-col="player" checked /> Player</label>
+                <label><input type="checkbox" data-col="server" checked /> Server ID</label>
+                <label><input type="checkbox" data-col="data" checked /> Data</label>
+              </div>
+            </div>
             <button id="filter-clear" class="btn ghost tiny">Clear</button>
-            <span class="filter-count" id="filter-count"></span>
           </div>
 
           <div class="events-table" id="events-table">
@@ -207,6 +217,30 @@
             </div>
             <div id="event-stream" class="et-body"></div>
           </div>
+        </div>
+      </div>
+
+      <!-- FUNNELS -->
+      <div id="tab-funnels" class="tab-pane hidden">
+        <div class="tile funnel-card">
+          <div class="tile-head">
+            <div>
+              <h3 class="funnel-title">Conversion Funnel <span class="live-flag">● live</span></h3>
+              <span class="funnel-subtitle">Stage progression and player retention</span>
+            </div>
+            <div class="funnel-cohort-badge" id="funnel-cohort">Cohort: 160 players</div>
+          </div>
+          <div class="filters" style="margin-bottom: 16px; margin-top: 4px;">
+            <label class="date-filter">From <input id="funnel-filter-from" type="date" /></label>
+            <label class="date-filter">To <input id="funnel-filter-to" type="date" /></label>
+          </div>
+          <div class="funnel-visualization" id="funnel-chart-container">
+            <div class="funnel-canvas" id="funnel-canvas">
+              <svg id="funnel-svg" class="funnel-svg" preserveAspectRatio="none"></svg>
+              <div id="funnel-stage-labels" class="funnel-stage-labels"></div>
+            </div>
+          </div>
+          <div id="funnel-cards-grid" class="funnel-cards-grid"></div>
         </div>
       </div>
 

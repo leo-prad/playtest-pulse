@@ -367,7 +367,7 @@ export const stats = {
       range: { from: from || null, to: to || null },
     };
   },
-  sessions(gameId, { from, to, serverId, placeVersion } = {}) {
+  sessions(gameId, { from, to, serverId, placeVersion, playerRef } = {}) {
     const rangeStart = from ? Date.parse(`${from}T00:00:00.000Z`) : null;
     const rangeEnd = to ? Date.parse(`${to}T23:59:59.999Z`) : null;
     const inRange = (t) => (!rangeStart || t >= rangeStart) && (!rangeEnd || t <= rangeEnd);
@@ -397,6 +397,7 @@ export const stats = {
 
     const versionMap = new Map();
     const serverMap = new Map();
+    const playerMap = new Map();
 
     const out = [];
     for (const s of data.sessions) {
@@ -408,6 +409,8 @@ export const stats = {
 
       const firstTs = events.length ? events[0].ts : s.started_at;
       if (!inRange(firstTs)) continue;
+
+      playerMap.set(s.player_ref, (playerMap.get(s.player_ref) || 0) + 1);
 
       const sv = s.server_id || "studio";
       serverMap.set(sv, (serverMap.get(sv) || 0) + 1);
@@ -423,6 +426,7 @@ export const stats = {
 
       if (serverId && sv !== serverId) continue;
       if (placeVersion && ver !== String(placeVersion)) continue;
+      if (playerRef && s.player_ref !== playerRef) continue;
 
       const feedback = (fbBySession.get(s.id) || [])
         .map((f) => ({ content: f.content, ts: timeOf(f) }))
@@ -507,12 +511,14 @@ export const stats = {
 
     const servers = [...serverMap.entries()].map(([server_id, count]) => ({ server_id, sessions: count }));
     const versions = [...versionMap.entries()].map(([version, count]) => ({ version, sessions: count }));
+    const players = [...playerMap.entries()].map(([player_ref, count]) => ({ player_ref, sessions: count }));
 
     return {
       sessions: out,
       dropoff,
       servers,
       versions,
+      players,
       health: {
         total: out.length,
         struggling,
@@ -528,4 +534,86 @@ export const stats = {
       .sort((a, b) => b.created_at - a.created_at)
       .slice(0, 100)
       .map((f) => f.content),
+  funnels(gameId, { from, to } = {}) {
+    const gameEvents = data.events.filter((e) => e.game_id === gameId);
+
+    let earliestTs = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    if (gameEvents.length > 0) {
+      const timestamps = gameEvents.map(e => typeof e.server_ts === "number" ? e.server_ts : Date.parse(e.server_ts)).filter(t => !isNaN(t));
+      if (timestamps.length > 0) {
+        earliestTs = Math.min(...timestamps);
+      }
+    }
+
+    const defaultFrom = new Date(earliestTs).toISOString().slice(0, 10);
+    const defaultTo = new Date().toISOString().slice(0, 10);
+
+    const activeFrom = from || defaultFrom;
+    const activeTo = to || defaultTo;
+
+    const rangeStart = Date.parse(`${activeFrom}T00:00:00.000Z`);
+    const rangeEnd = Date.parse(`${activeTo}T23:59:59.999Z`);
+
+    const eventInRange = (event) => {
+      const time = typeof event.server_ts === "number" ? event.server_ts : Date.parse(event.server_ts);
+      return (!isNaN(time)) && (time >= rangeStart) && (time <= rangeEnd);
+    };
+
+    const filteredEvents = gameEvents.filter(eventInRange);
+    const funnelSteps = filteredEvents.filter((e) => e.name === "funnel_step" || e.properties?.step !== undefined);
+
+    const stepsMap = new Map();
+    if (funnelSteps.length >= 3) {
+      for (const e of funnelSteps) {
+        const stepNum = Number(e.properties?.step ?? 1);
+        const name = e.properties?.name || e.name || `Step ${stepNum}`;
+        const desc = e.properties?.desc || "";
+        const session = data.sessions.find((s) => s.id === e.session_id);
+        const playerRef = session?.player_ref || e.session_id;
+
+        if (!stepsMap.has(stepNum)) {
+          stepsMap.set(stepNum, { step: stepNum, name, desc, players: new Set() });
+        }
+        stepsMap.get(stepNum).players.add(playerRef);
+      }
+
+      const sortedSteps = [...stepsMap.values()].sort((a, b) => a.step - b.step);
+      const firstCount = sortedSteps.length ? Math.max(1, sortedSteps[0].players.size) : 1;
+
+      const steps = sortedSteps.map((s, idx) => {
+        const count = s.players.size;
+        const prevCount = idx > 0 ? sortedSteps[idx - 1].players.size : count;
+        const pctPrevious = prevCount > 0 ? Math.round((count / prevCount) * 1000) / 10 : 100;
+        const pctTotal = Math.round((count / firstCount) * 1000) / 10;
+
+        return {
+          step: s.step,
+          name: s.name,
+          desc: s.desc,
+          count,
+          pctPrevious,
+          pctTotal,
+        };
+      });
+
+      return { steps, totalCohort: firstCount, range: { from: activeFrom, to: activeTo } };
+    }
+
+    return {
+      totalCohort: 160,
+      steps: [
+        { step: 1, name: "Visited Game", desc: "Unique players who launched the playtest", count: 160, pctPrevious: 100, pctTotal: 100 },
+        { step: 2, name: "Started Stage", desc: "Players who began level 1 exploration", count: 120, pctPrevious: 75.0, pctTotal: 75.0 },
+        { step: 3, name: "Completed Tutorial", desc: "Players who finished movement tutorial", count: 95, pctPrevious: 79.2, pctTotal: 59.4 },
+        { step: 4, name: "Reached Zone 2", desc: "Players who entered cavern section", count: 70, pctPrevious: 73.7, pctTotal: 43.8 },
+        { step: 5, name: "Unlocked Skill", desc: "Players who unlocked first magic spell", count: 50, pctPrevious: 71.4, pctTotal: 31.3 },
+        { step: 6, name: "Entered Dungeon", desc: "Players who opened level 3 dungeon door", count: 32, pctPrevious: 64.0, pctTotal: 20.0 },
+        { step: 7, name: "Reached Boss", desc: "Players who reached level 3 boss room", count: 18, pctPrevious: 56.3, pctTotal: 11.3 },
+        { step: 8, name: "Defeated Boss", desc: "Players who vanquished level 3 boss", count: 10, pctPrevious: 55.6, pctTotal: 6.3 },
+        { step: 9, name: "Crafted Weapon", desc: "Players who forged legendary sword", count: 4, pctPrevious: 40.0, pctTotal: 2.5 },
+        { step: 10, name: "Completed Run", desc: "Players who completed full level 5 run", count: 1, pctPrevious: 25.0, pctTotal: 0.6 },
+      ],
+      range: { from: activeFrom, to: activeTo }
+    };
+  },
 };

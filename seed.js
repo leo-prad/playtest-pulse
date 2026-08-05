@@ -14,23 +14,29 @@ const rand = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const FEEDBACK = [
-  "the boss on level 3 is way too hard, died like 8 times",
-  "level 3 boss is impossible, no way to dodge the attacks",
-  "boss fights are brutal but satisfying when you win",
-  "movement feels laggy sometimes, especially in the cave",
-  "there was noticeable lag when lots of enemies spawned",
-  "combat felt laggy near the end",
-  "love the art style, the dungeon lighting is gorgeous",
-  "art is amazing, really atmospheric",
-  "the visuals are beautiful honestly",
-  "controls are confusing, couldn't figure out how to block",
-  "took me forever to learn the controls, needs a tutorial",
-  "add a tutorial please, jumped in with no idea what to do",
-  "really fun, played for an hour straight",
-  "great game, will definitely come back",
-  "the loot system is addictive",
-  "inventory is clunky to use mid-fight",
-  "wish there were more checkpoints, losing progress hurts",
+  "The boss on level 3 is way too hard, I died like 8 times in a row",
+  "Level 3 boss is nearly impossible, no window to dodge the heavy attack",
+  "Boss fight difficulty is brutal, but really satisfying when you finally win",
+  "Boss phase 2 is way too fast compared to phase 1",
+  "More checkpoints would make failed runs less frustrating",
+  "Wish there were checkpoints before boss rooms so I don't lose progress",
+  "Need more checkpoints in level 4, walking back takes 3 minutes",
+  "Checkpoints feel too far apart in the cave zone",
+  "Movement feels laggy sometimes, especially in the cavern section",
+  "There was noticeable combat lag when lots of skeleton mobs spawned",
+  "Network lag spikes whenever a new player joins the server",
+  "Framerate dropped severely during the boss particle attack",
+  "Controls are confusing, couldn't figure out how to block or parry",
+  "Took me forever to figure out the controls, needs a proper tutorial",
+  "Please add a tutorial at the start, I had no idea how to spellcast",
+  "Tutorial prompt disappeared too fast before I could read it",
+  "Loot drops are super addictive and rewarding!",
+  "Loot chests are hard to spot in dark dungeon areas",
+  "Inventory menu is clunky to navigate while fighting mobs",
+  "Inventory auto-sort button would be a lifesaver",
+  "Love the art style, dungeon lighting looks gorgeous and atmospheric",
+  "Graphics and particle effects look amazing honestly",
+  "Camera angle gets stuck behind walls in tight hallways",
 ];
 
 const EVENTS = [
@@ -76,20 +82,36 @@ async function main() {
   const apiKey = game.api_key;
   console.log("Game ready:", game.name);
 
-  // A few fake live-server ids so the "filter by server" view has variety.
   const SERVERS = ["srv-us-east-01", "srv-eu-west-02", "srv-ap-southeast-03"];
+  const SESSIONS = 16;
 
-  const SESSIONS = 15;
   for (let i = 0; i < SESSIONS; i++) {
     const playerId = 100000 + Math.floor(Math.random() * 900000);
-    const eventCount = 4 + Math.floor(Math.random() * 8);
     const events = [{ name: "session_start", properties: { place_version: 42 }, client_ts: Date.now() }];
+
+    // Add funnel_step progression events based on index
+    events.push({ name: "funnel_step", properties: { step: 1, name: "Visited Game", desc: "Launched playtest session" }, client_ts: Date.now() });
+
+    if (i < 13) {
+      events.push({ name: "funnel_step", properties: { step: 2, name: "Started Stage", desc: "Began dungeon exploration" }, client_ts: Date.now() });
+    }
+    if (i < 9) {
+      events.push({ name: "funnel_step", properties: { step: 3, name: "Reached Boss", desc: "Encountered level boss" }, client_ts: Date.now() });
+    }
+    if (i < 5) {
+      events.push({ name: "funnel_step", properties: { step: 4, name: "Defeated Boss", desc: "Vanquished dungeon boss" }, client_ts: Date.now() });
+    }
+    if (i < 3) {
+      events.push({ name: "funnel_step", properties: { step: 5, name: "Completed Run", desc: "Successfully escaped dungeon" }, client_ts: Date.now() });
+    }
+
+    const eventCount = 3 + Math.floor(Math.random() * 6);
     for (let e = 0; e < eventCount; e++) {
       const def = rand(EVENTS);
       events.push({ name: def.name, properties: def.props(), client_ts: Date.now() });
     }
 
-    const feedback = Math.random() < 0.6 ? [{ content: rand(FEEDBACK) }] : [];
+    const feedback = Math.random() < 0.75 ? [{ content: rand(FEEDBACK) }] : [];
 
     const result = await req("/ingest", {
       method: "POST",

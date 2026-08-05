@@ -8,13 +8,21 @@
 
 const MODEL = "claude-sonnet-4-6";
 
-export async function summarizeFeedback(feedbackList) {
+export async function summarizeFeedback(feedbackList, customKeywords = []) {
   if (!feedbackList || feedbackList.length === 0) {
     return {
       mode: "empty",
       themes: [],
       note: "No feedback collected yet. Fire some SubmitFeedback calls from a playtest.",
     };
+  }
+
+  const cleanKeywords = (Array.isArray(customKeywords) ? customKeywords : [])
+    .map((k) => String(k).replace(/[^a-zA-Z0-9\s_-]/g, "").trim().toLowerCase())
+    .filter(Boolean);
+
+  if (cleanKeywords.length > 0) {
+    return customKeywordSummary(feedbackList, cleanKeywords);
   }
 
   if (process.env.ANTHROPIC_API_KEY) {
@@ -26,6 +34,42 @@ export async function summarizeFeedback(feedbackList) {
     }
   }
   return localSummary(feedbackList);
+}
+
+function customKeywordSummary(feedbackList, keywords) {
+  const themes = [];
+  for (const kw of keywords) {
+    let count = 0;
+    let quote = null;
+    for (const raw of feedbackList) {
+      if (raw.toLowerCase().includes(kw)) {
+        count++;
+        if (!quote) quote = raw;
+      }
+    }
+    if (count > 0) {
+      themes.push({
+        title: `Mentions of "${kw}"`,
+        count,
+        severity: count >= feedbackList.length * 0.4 ? "high" : count >= 3 ? "medium" : "low",
+        quote,
+      });
+    } else {
+      themes.push({
+        title: `Mentions of "${kw}"`,
+        count: 0,
+        severity: "low",
+        quote: `No feedback entries contain "${kw}".`,
+      });
+    }
+  }
+  themes.sort((a, b) => b.count - a.count);
+
+  return {
+    mode: "custom",
+    themes,
+    note: `Filtered analysis for custom keywords: ${keywords.join(", ")}`,
+  };
 }
 
 async function summarizeWithLLM(feedbackList) {
@@ -73,7 +117,7 @@ async function summarizeWithLLM(feedbackList) {
 // meaningful words and surfaces the most common clusters with a real quote.
 function localSummary(feedbackList) {
   const STOP = new Set(
-    "the a an and or but is are was it this that i you we they to of in on for with my me too so very really just get got game so".split(
+    "the a an and or but is are was it this that i you we they to of in on for with my me too so very really just get got game more would make failed runs like have been from their your about when some there them than with could feel feels felt".split(
       " "
     )
   );

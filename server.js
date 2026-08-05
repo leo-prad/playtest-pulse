@@ -283,19 +283,30 @@ app.get("/api/games/:id/stats", requireAuth, (req, res) => {
 app.get("/api/games/:id/sessions", requireAuth, (req, res) => {
   const game = games.byIdForUser(req.params.id, req.user.id);
   if (!game) return res.status(404).json({ error: "Game not found." });
-  const { from, to, server, version } = req.query;
+  const { from, to, server, version, player } = req.query;
   const validDate = (value) => !value || /^\d{4}-\d{2}-\d{2}$/.test(value);
   if (!validDate(from) || !validDate(to))
     return res.status(400).json({ error: "Dates must use YYYY-MM-DD." });
   if (from && to && from > to)
     return res.status(400).json({ error: "Start date must be before end date." });
-  res.json(stats.sessions(game.id, { from, to, serverId: server, placeVersion: version }));
+  res.json(stats.sessions(game.id, { from, to, serverId: server, placeVersion: version, playerRef: player }));
+});
+
+app.get("/api/games/:id/funnels", requireAuth, (req, res) => {
+  const game = games.byIdForUser(req.params.id, req.user.id);
+  if (!game) return res.status(404).json({ error: "Game not found." });
+  const { from, to } = req.query;
+  res.json(stats.funnels(game.id, { from, to }));
 });
 
 app.post("/api/games/:id/summarize", requireAuth, async (req, res) => {
   const game = games.byIdForUser(req.params.id, req.user.id);
   if (!game) return res.status(404).json({ error: "Game not found." });
-  res.json(await summarizeFeedback(stats.feedbackText(game.id)));
+  const rawKeywords = req.body?.keywords;
+  const keywords = typeof rawKeywords === "string"
+    ? rawKeywords.split(",").map((k) => k.trim()).filter(Boolean)
+    : Array.isArray(rawKeywords) ? rawKeywords : [];
+  res.json(await summarizeFeedback(stats.feedbackText(game.id), keywords));
 });
 
 // ------------------------------------------------------------- ingestion

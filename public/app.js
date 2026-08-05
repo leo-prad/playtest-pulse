@@ -1,6 +1,6 @@
 // app.js — Playtest Pulse dashboard client. Vanilla JS, no build step.
 
-const DEFAULT_COLS = { time: true, player: true, server: true, data: true };
+const DEFAULT_COLS = { time: true, player: true, server: true, data: true, feedback: true };
 
 function loadCols() {
   try {
@@ -19,14 +19,15 @@ const state = {
   tab: "overall",
   latest: null, // last stats payload, so filters re-render without a refetch
   revealKey: false,
-  filters: { event: "", player: "", server: "", version: "", from: "", to: "" },
+  filters: { event: "", player: "", server: "", version: "", search: "", from: "", to: "" },
+  funnelFilters: { from: "", to: "" },
   sort: { key: "time", dir: "desc" }, // Events table sort (time = newest first)
   cols: loadCols(), // which Events columns are visible (persisted)
   summarizedGameId: null, // game whose feedback we've already auto-crunched this session
   sessions: null, // last /sessions payload (Sessions tab)
   selectedSession: null, // id of the session opened in the replay panel
   sessFilter: "all", // Sessions list filter: all | struggling | completed | feedback
-  replaySort: "asc", // replay event list order: "asc" (chronological) | "desc"
+  replaySort: "desc", // replay event list order: "desc" (newest first) | "asc"
   _sessSig: null, // change signature so polling doesn't needlessly redraw the list
 };
 
@@ -232,6 +233,9 @@ document.addEventListener("click", (e) => {
 function selectGame(id) {
   state.currentGameId = id;
   state.filters = { event: "", player: "", server: "", from: "", to: "" };
+  state.funnelFilters = { from: "", to: "" };
+  if ($("funnel-filter-from")) $("funnel-filter-from").value = "";
+  if ($("funnel-filter-to")) $("funnel-filter-to").value = "";
   state.sessions = null;
   state.selectedSession = null;
   state._sessSig = null;
@@ -276,14 +280,20 @@ async function deleteGame(game) {
 }
 
 // ---------- tabs ----------
-const TAB_IDS = ["overall", "sessions", "events", "connection"];
+const TAB_IDS = ["overall", "sessions", "events", "funnels", "connection"];
+
+function switchTab(id) {
+  state.tab = id;
+  for (const t of document.querySelectorAll(".tab")) t.classList.toggle("active", t.dataset.tab === id);
+  for (const tid of TAB_IDS) $(`tab-${tid}`).classList.toggle("hidden", state.tab !== tid);
+  if (state.tab === "sessions") loadSessions(); // make the first open snappy
+  if (state.tab === "funnels") loadFunnels();
+}
+
 $("tabs").addEventListener("click", (e) => {
   const btn = e.target.closest(".tab");
   if (!btn) return;
-  state.tab = btn.dataset.tab;
-  for (const t of document.querySelectorAll(".tab")) t.classList.toggle("active", t === btn);
-  for (const id of TAB_IDS) $(`tab-${id}`).classList.toggle("hidden", state.tab !== id);
-  if (state.tab === "sessions") loadSessions(); // make the first open snappy
+  switchTab(btn.dataset.tab);
 });
 
 // ---------- filters ----------
@@ -299,6 +309,12 @@ $("filter-server").addEventListener("change", (e) => {
   state.filters.server = e.target.value;
   renderStream();
 });
+if ($("sess-filter-player")) {
+  $("sess-filter-player").addEventListener("change", (e) => {
+    state.filters.player = e.target.value;
+    loadSessions();
+  });
+}
 if ($("sess-filter-server")) {
   $("sess-filter-server").addEventListener("change", (e) => {
     state.filters.server = e.target.value;
@@ -311,6 +327,35 @@ if ($("sess-filter-version")) {
     loadSessions();
   });
 }
+if ($("sess-search")) {
+  $("sess-search").addEventListener("input", (e) => {
+    state.filters.search = e.target.value;
+    if (state.sessions?.sessions) {
+      renderSessionList(state.sessions.sessions);
+    }
+  });
+}
+[$("sess-filter-from"), $("sess-filter-to")].forEach((el) => {
+  if (el) {
+    el.addEventListener("change", () => {
+      state.filters.from = $("sess-filter-from")?.value || "";
+      state.filters.to = $("sess-filter-to")?.value || "";
+      loadSessions();
+    });
+  }
+});
+if ($("sess-filter-clear")) {
+  $("sess-filter-clear").addEventListener("click", () => {
+    state.filters = { event: "", player: "", server: "", version: "", search: "", from: "", to: "" };
+    if ($("sess-search")) $("sess-search").value = "";
+    if ($("sess-filter-player")) $("sess-filter-player").value = "";
+    if ($("sess-filter-server")) $("sess-filter-server").value = "";
+    if ($("sess-filter-version")) $("sess-filter-version").value = "";
+    if ($("sess-filter-from")) $("sess-filter-from").value = "";
+    if ($("sess-filter-to")) $("sess-filter-to").value = "";
+    loadSessions();
+  });
+}
 [$("filter-from"), $("filter-to")].forEach((el) =>
   el.addEventListener("change", () => {
     state.filters.from = $("filter-from").value;
@@ -318,6 +363,15 @@ if ($("sess-filter-version")) {
     refreshStats();
   })
 );
+[$("funnel-filter-from"), $("funnel-filter-to")].forEach((el) => {
+  if (el) {
+    el.addEventListener("change", () => {
+      state.funnelFilters.from = $("funnel-filter-from").value;
+      state.funnelFilters.to = $("funnel-filter-to").value;
+      loadFunnels();
+    });
+  }
+});
 $("filter-clear").addEventListener("click", () => {
   state.filters = { event: "", player: "", server: "", from: "", to: "" };
   $("filter-event").value = "";
@@ -416,6 +470,9 @@ function syncFilterOptions(s) {
       .map((v) => `<option value="${escapeHtml(v.server_id)}">${escapeHtml(serverLabel(v.server_id))} · ${v.sessions} sess.</option>`)
       .join("");
   sSel.value = state.filters.server;
+
+  syncCustomSelect(pSel);
+  syncCustomSelect(sSel);
 }
 
 // ---------- dashboard ----------
@@ -468,7 +525,17 @@ function renderStream() {
 
   const f = state.filters;
   const rows = (s.recentEvents || []).filter((e) => {
-    if (f.event && !e.name.toLowerCase().includes(f.event)) return false;
+    if (f.event) {
+      const q = f.event.toLowerCase();
+      const name = String(e.name || "").toLowerCase();
+      const pRef = String(e.player_ref || "").toLowerCase();
+      const pLabel = String(playerLabel(e.player_ref) || "").toLowerCase();
+      const sId = String(e.server_id || "").toLowerCase();
+      const sLabel = String(serverLabel(e.server_id) || "").toLowerCase();
+      const props = JSON.stringify(e.properties || {}).toLowerCase();
+      const inAny = name.includes(q) || pRef.includes(q) || pLabel.includes(q) || sId.includes(q) || sLabel.includes(q) || props.includes(q);
+      if (!inAny) return false;
+    }
     if (f.player && e.player_ref !== f.player) return false;
     if (f.server && e.server_id !== f.server) return false;
     return true;
@@ -505,6 +572,9 @@ function renderStream() {
     .map((e) => {
       const t = new Date(e.server_ts).toLocaleTimeString();
       const data = e.properties ? JSON.stringify(e.properties) : "—";
+      const fbText = e.properties && (e.properties.content || e.properties.feedback || e.properties.msg)
+        ? String(e.properties.content || e.properties.feedback || e.properties.msg)
+        : (e.name === "feedback_submitted" ? data : "—");
       const color = playerColor(e.player_ref);
       return `<div class="et-row">
         <span class="et-cell col-time">${t}</span>
@@ -514,6 +584,7 @@ function renderStream() {
         <span class="et-cell col-server mono" title="${escapeHtml(e.server_id)}">${escapeHtml(serverLabel(e.server_id))}</span>
         <span class="et-cell col-event">${escapeHtml(e.name)}</span>
         <span class="et-cell col-data mono" title="${escapeHtml(data)}">${escapeHtml(data)}</span>
+        <span class="et-cell col-feedback" title="${escapeHtml(fbText)}">${escapeHtml(fbText)}</span>
       </div>`;
     })
     .join("");
@@ -683,15 +754,29 @@ function renderChart(series, opts = {}) {
     if (!drag) return;
     const lo = Math.min(drag.i, idxAt(e.clientX));
     const hi = Math.max(drag.i, idxAt(e.clientX));
+    const isClick = hi === lo;
     drag = null;
     sel.classList.add("hidden");
-    if (hi - lo < 1) return; // ignore clicks / tiny drags
+    if (isClick) {
+      const dStr = isoDate(buckets[lo].t);
+      state.filters.from = dStr;
+      state.filters.to = dStr;
+      if ($("filter-from")) $("filter-from").value = dStr;
+      if ($("filter-to")) $("filter-to").value = dStr;
+      if ($("sess-filter-from")) $("sess-filter-from").value = dStr;
+      if ($("sess-filter-to")) $("sess-filter-to").value = dStr;
+      switchTab("events");
+      refreshStats();
+      return;
+    }
     const from = isoDate(buckets[lo].t);
     const to = isoDate(buckets[hi].t);
     state.filters.from = from;
     state.filters.to = to;
-    $("filter-from").value = from;
-    $("filter-to").value = to;
+    if ($("filter-from")) $("filter-from").value = from;
+    if ($("filter-to")) $("filter-to").value = to;
+    if ($("sess-filter-from")) $("sess-filter-from").value = from;
+    if ($("sess-filter-to")) $("sess-filter-to").value = to;
     refreshStats();
   }
   window.addEventListener("mouseup", onUp);
@@ -736,6 +821,7 @@ async function loadSessions() {
     if (state.filters.to) params.set("to", state.filters.to);
     if (state.filters.server) params.set("server", state.filters.server);
     if (state.filters.version) params.set("version", state.filters.version);
+    if (state.filters.player) params.set("player", state.filters.player);
     const suffix = params.size ? `?${params}` : "";
     state.sessions = await api(`/api/games/${game.id}/sessions${suffix}`);
   } catch {
@@ -744,28 +830,107 @@ async function loadSessions() {
   renderSessions();
 }
 
+function syncCustomSelect(selectEl) {
+  if (!selectEl) return;
+  let wrap = selectEl.previousElementSibling;
+  if (!wrap || !wrap.classList.contains("c-select-wrap")) {
+    wrap = document.createElement("div");
+    wrap.className = "c-select-wrap";
+    selectEl.classList.add("hidden");
+    selectEl.parentNode.insertBefore(wrap, selectEl);
+  }
+
+  if (wrap.classList.contains("open")) return;
+
+  const selectedOpt = selectEl.options[selectEl.selectedIndex] || selectEl.options[0];
+  const label = selectedOpt ? selectedOpt.textContent : "";
+
+  wrap.innerHTML = `
+    <button class="c-select-trigger" type="button">
+      <span class="c-select-label">${escapeHtml(label)}</span>
+      <span class="c-select-arrow">▼</span>
+    </button>
+    <div class="c-select-menu hidden">
+      ${Array.from(selectEl.options)
+        .map(
+          (opt) => `<div class="c-select-option ${opt.value === selectEl.value ? "selected" : ""}" data-value="${escapeHtml(opt.value)}">${escapeHtml(opt.textContent)}</div>`
+        )
+        .join("")}
+    </div>
+  `;
+
+  const trig = wrap.querySelector(".c-select-trigger");
+  const menu = wrap.querySelector(".c-select-menu");
+
+  trig.onclick = (e) => {
+    e.stopPropagation();
+    document.querySelectorAll(".c-select-wrap.open").forEach((w) => {
+      if (w !== wrap) {
+        w.classList.remove("open");
+        w.querySelector(".c-select-menu")?.classList.add("hidden");
+      }
+    });
+    const isOpen = wrap.classList.toggle("open");
+    menu.classList.toggle("hidden", !isOpen);
+  };
+
+  menu.onclick = (e) => {
+    const item = e.target.closest(".c-select-option");
+    if (!item) return;
+    selectEl.value = item.dataset.value;
+    selectEl.dispatchEvent(new Event("change", { bubbles: true }));
+    wrap.classList.remove("open");
+    menu.classList.add("hidden");
+    syncCustomSelect(selectEl);
+  };
+}
+
+document.addEventListener("click", () => {
+  document.querySelectorAll(".c-select-wrap.open").forEach((w) => {
+    w.classList.remove("open");
+    w.querySelector(".c-select-menu")?.classList.add("hidden");
+  });
+});
+
 function syncSessionFilterOptions(data) {
+  const pSel = $("sess-filter-player");
   const sSel = $("sess-filter-server");
   const vSel = $("sess-filter-version");
-  if (!sSel || !vSel) return;
 
+  const players = data.players || [];
   const servers = data.servers || [];
   const versions = data.versions || [];
   const total = data.health?.total || (data.sessions ? data.sessions.length : 0);
 
-  sSel.innerHTML =
-    `<option value="">All servers (${total})</option>` +
-    servers
-      .map((v) => `<option value="${escapeHtml(v.server_id)}">${escapeHtml(serverLabel(v.server_id))} (${v.sessions})</option>`)
-      .join("");
-  sSel.value = state.filters.server || "";
+  if (pSel) {
+    pSel.innerHTML =
+      `<option value="">All players (${total})</option>` +
+      players
+        .map((p) => `<option value="${escapeHtml(p.player_ref)}">${escapeHtml(playerLabel(p.player_ref))} (${p.sessions})</option>`)
+        .join("");
+    pSel.value = state.filters.player || "";
+    syncCustomSelect(pSel);
+  }
 
-  vSel.innerHTML =
-    `<option value="">All versions (${total})</option>` +
-    versions
-      .map((v) => `<option value="${escapeHtml(v.version)}">v${escapeHtml(v.version)} (${v.sessions})</option>`)
-      .join("");
-  vSel.value = state.filters.version || "";
+  if (sSel) {
+    sSel.innerHTML =
+      `<option value="">All servers (${total})</option>` +
+      servers
+        .map((v) => `<option value="${escapeHtml(v.server_id)}">${escapeHtml(serverLabel(v.server_id))} (${v.sessions})</option>`)
+        .join("");
+    sSel.value = state.filters.server || "";
+    syncCustomSelect(sSel);
+  }
+
+  if (vSel) {
+    vSel.innerHTML =
+      `<option value="">All versions (${total})</option>` +
+      versions
+        .map((v) => `<option value="${escapeHtml(v.version)}">v${escapeHtml(v.version)} (${v.sessions})</option>`)
+        .join("");
+    vSel.value = state.filters.version || "";
+    syncCustomSelect(vSel);
+  }
 }
 
 function renderSessions() {
@@ -828,15 +993,42 @@ function renderHealth(h) {
 
 function renderSessionList(sessions) {
   const host = $("session-list");
-  const match = {
-    all: () => true,
-    struggling: (s) => s.struggling,
-    completed: (s) => s.completed,
-    feedback: (s) => s.feedback.length > 0,
-  }[state.sessFilter] || (() => true);
+  const q = (state.filters.search || "").trim().toLowerCase();
+
+  const match = (s) => {
+    if (state.sessFilter === "struggling" && !s.struggling) return false;
+    if (state.sessFilter === "completed" && !s.completed) return false;
+    if (state.sessFilter === "feedback" && s.feedback.length === 0) return false;
+
+    if (q) {
+      const pRef = (s.player_ref || "").toLowerCase();
+      const pLabel = (playerLabel(s.player_ref) || "").toLowerCase();
+      const sId = (s.server_id || "").toLowerCase();
+      const sLabel = (serverLabel(s.server_id) || "").toLowerCase();
+      const sessId = (s.id || "").toLowerCase();
+      const region = (s.region || "").toLowerCase();
+      const flags = (s.flags || []).join(" ").toLowerCase();
+      const fbText = (s.feedback || []).map((f) => f.content).join(" ").toLowerCase();
+
+      const inAny =
+        pRef.includes(q) ||
+        pLabel.includes(q) ||
+        sId.includes(q) ||
+        sLabel.includes(q) ||
+        sessId.includes(q) ||
+        region.includes(q) ||
+        flags.includes(q) ||
+        fbText.includes(q);
+
+      if (!inAny) return false;
+    }
+    return true;
+  };
+
   const filtered = sessions.filter(match);
+  const total = state.sessions?.health?.total || sessions.length;
   $("sess-count").textContent =
-    filtered.length === sessions.length ? `${sessions.length}` : `${filtered.length} of ${sessions.length}`;
+    filtered.length === total ? `${total}` : `${filtered.length} of ${total}`;
 
   if (filtered.length === 0) {
     const empty =
@@ -932,11 +1124,21 @@ function renderSessionDetail(s) {
   const list = ordered
     .map(({ e, i }) => {
       const data = e.properties ? JSON.stringify(e.properties) : "";
+      let fbText = e.properties && (e.properties.content || e.properties.feedback || e.properties.msg)
+        ? String(e.properties.content || e.properties.feedback || e.properties.msg)
+        : (e.name === "feedback_submitted" ? data : "");
+      if (!fbText && s.feedback && s.feedback.length > 0) {
+        const match = s.feedback.find(
+          (f) => Math.abs(f.ts - e.ts) < 5000 || (i === evs.length - 1 && Math.abs(f.ts - e.ts) < 60000)
+        );
+        if (match) fbText = match.content;
+      }
       return `<div class="replay-ev k-${eventKind(e.name)}" data-i="${i}">
         <span class="re-time">${escapeHtml(fmtClock(e.ts))}</span>
         <span class="re-dot"></span>
         <span class="re-name">${escapeHtml(e.name)}</span>
-        <span class="re-data mono">${escapeHtml(data)}</span>
+        <span class="re-data mono" title="${escapeHtml(data)}">${escapeHtml(data)}</span>
+        <span class="re-feedback" title="${escapeHtml(fbText)}">${escapeHtml(fbText)}</span>
       </div>`;
     })
     .join("");
@@ -970,6 +1172,7 @@ function renderSessionDetail(s) {
         <span></span>
         <span>Event</span>
         <span>Data</span>
+        <span>Feedback</span>
       </div>
       ${list}
     </div>
@@ -1075,15 +1278,55 @@ $("rotate-key").addEventListener("click", async () => {
 });
 
 // ---------- feedback ----------
+state.customTags = [];
+
+function renderCustomTags() {
+  const host = $("fb-tag-list");
+  if (!host) return;
+  host.innerHTML = state.customTags
+    .map(
+      (tag) => `<span class="fb-tag-pill">
+        <span class="remove-tag" data-tag="${escapeHtml(tag)}">×</span>
+        <span class="tag-label">${escapeHtml(tag)}</span>
+      </span>`
+    )
+    .join("");
+}
+
+function addCustomTag(raw) {
+  const clean = String(raw).replace(/[^a-zA-Z0-9\s_-]/g, "").trim();
+  if (clean && !state.customTags.includes(clean)) {
+    state.customTags.push(clean);
+    renderCustomTags();
+    runSummary();
+  }
+}
+
+function removeCustomTag(tag) {
+  state.customTags = state.customTags.filter((t) => t !== tag);
+  renderCustomTags();
+  runSummary();
+}
+
 async function runSummary() {
   const game = currentGame();
   if (!game) return;
   const out = $("summary-out");
+  const typed = ($("fb-keywords")?.value || "").trim();
+  if (typed) {
+    addCustomTag(typed);
+    if ($("fb-keywords")) $("fb-keywords").value = "";
+    return;
+  }
+  const keywords = state.customTags.join(",");
   $("summarize-btn").disabled = true;
   $("summarize-btn").textContent = "Analyzing…";
   out.innerHTML = `<p class="muted">Crunching feedback…</p>`;
   try {
-    const r = await api(`/api/games/${game.id}/summarize`, { method: "POST" });
+    const r = await api(`/api/games/${game.id}/summarize`, {
+      method: "POST",
+      body: { keywords },
+    });
     state.summarizedGameId = game.id;
     renderSummary(r);
   } catch (e) {
@@ -1095,6 +1338,33 @@ async function runSummary() {
 }
 
 $("summarize-btn").addEventListener("click", runSummary);
+
+if ($("fb-keywords")) {
+  $("fb-keywords").addEventListener("input", (e) => {
+    if (e.target.value.includes(",")) {
+      const parts = e.target.value.split(",");
+      const last = parts.pop();
+      for (const p of parts) addCustomTag(p);
+      e.target.value = last;
+    }
+  });
+  $("fb-keywords").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === ",") {
+      e.preventDefault();
+      addCustomTag(e.target.value);
+      e.target.value = "";
+    }
+  });
+}
+
+if ($("fb-tag-list")) {
+  $("fb-tag-list").addEventListener("click", (e) => {
+    const rm = e.target.closest(".remove-tag");
+    if (rm) {
+      removeCustomTag(rm.dataset.tag);
+    }
+  });
+}
 
 function renderSummary(r) {
   const out = $("summary-out");
@@ -1117,10 +1387,200 @@ function renderSummary(r) {
       .join("") + (r.note ? `<p class="summary-note">${escapeHtml(r.note)}</p>` : "");
 }
 
+function initFeedbackTooltip() {
+  let tip = $("fb-bubble-tooltip");
+  if (!tip) {
+    tip = document.createElement("div");
+    tip.id = "fb-bubble-tooltip";
+    tip.className = "fb-bubble-tooltip";
+    document.body.appendChild(tip);
+  }
+
+  document.addEventListener("mouseover", (e) => {
+    const target = e.target.closest(".re-feedback, .replay-fb, .fb-quote, .fb-dot");
+    if (!target) return;
+    const text = target.getAttribute("title") || target.dataset.feedback || target.textContent;
+    if (!text || text === "—") return;
+    const cleanText = text.replace(/^💬\s*“?|”?$/g, "").trim();
+    if (!cleanText) return;
+
+    tip.innerHTML = `<div class="fb-tip-quote">💬 “${escapeHtml(cleanText)}”</div>`;
+    const rect = target.getBoundingClientRect();
+    tip.style.left = `${rect.left + rect.width / 2}px`;
+    tip.style.top = `${rect.top - 8}px`;
+    tip.classList.add("visible");
+  });
+
+  document.addEventListener("mouseout", (e) => {
+    const target = e.target.closest(".re-feedback, .replay-fb, .fb-quote, .fb-dot");
+    if (target && tip) {
+      tip.classList.remove("visible");
+    }
+  });
+}
+
+// ---------- funnels ----------
+const DEMO_FUNNEL = {
+  totalCohort: 160,
+  steps: [
+    { step: 1, name: "Visited Game", desc: "Unique players who launched the playtest", count: 160, pctPrevious: 100, pctTotal: 100 },
+    { step: 2, name: "Started Stage", desc: "Players who began level 1 exploration", count: 120, pctPrevious: 75.0, pctTotal: 75.0 },
+    { step: 3, name: "Completed Tutorial", desc: "Players who finished movement tutorial", count: 95, pctPrevious: 79.2, pctTotal: 59.4 },
+    { step: 4, name: "Reached Zone 2", desc: "Players who entered cavern section", count: 70, pctPrevious: 73.7, pctTotal: 43.8 },
+    { step: 5, name: "Unlocked Skill", desc: "Players who unlocked first magic spell", count: 50, pctPrevious: 71.4, pctTotal: 31.3 },
+    { step: 6, name: "Entered Dungeon", desc: "Players who opened level 3 dungeon door", count: 32, pctPrevious: 64.0, pctTotal: 20.0 },
+    { step: 7, name: "Reached Boss", desc: "Players who reached level 3 boss room", count: 18, pctPrevious: 56.3, pctTotal: 11.3 },
+    { step: 8, name: "Defeated Boss", desc: "Players who vanquished level 3 boss", count: 10, pctPrevious: 55.6, pctTotal: 6.3 },
+    { step: 9, name: "Crafted Weapon", desc: "Players who forged legendary sword", count: 4, pctPrevious: 40.0, pctTotal: 2.5 },
+    { step: 10, name: "Completed Run", desc: "Players who completed full level 5 run", count: 1, pctPrevious: 25.0, pctTotal: 0.6 },
+  ],
+  range: {
+    from: "2026-08-01",
+    to: new Date().toISOString().slice(0, 10),
+  }
+};
+
+async function loadFunnels() {
+  const game = currentGame();
+  if (!game) {
+    renderFunnels(DEMO_FUNNEL);
+    return;
+  }
+  try {
+    let url = `/api/games/${game.id}/funnels`;
+    const params = new URLSearchParams();
+    if (state.funnelFilters.from) params.append("from", state.funnelFilters.from);
+    if (state.funnelFilters.to) params.append("to", state.funnelFilters.to);
+    const query = params.toString();
+    if (query) url += `?${query}`;
+
+    const data = await api(url);
+    renderFunnels(data || DEMO_FUNNEL);
+  } catch {
+    renderFunnels(DEMO_FUNNEL);
+  }
+}
+
+function renderFunnels(data) {
+  const cohortEl = $("funnel-cohort");
+  const svg = $("funnel-svg");
+  const labelsHost = $("funnel-stage-labels");
+  const cardsHost = $("funnel-cards-grid");
+  const canvas = $("funnel-canvas");
+  const chartWrap = $("funnel-chart-container");
+  if (!data || !data.steps || data.steps.length === 0) return;
+
+  if (data.range) {
+    if ($("funnel-filter-from")) $("funnel-filter-from").value = data.range.from || "";
+    if ($("funnel-filter-to")) $("funnel-filter-to").value = data.range.to || "";
+  }
+
+  const steps = data.steps;
+  const cohort = data.totalCohort || (steps.length ? steps[0].count : 1);
+  if (cohortEl) cohortEl.textContent = `Cohort: ${cohort} players`;
+
+  const numSteps = steps.length;
+  const isScrollable = numSteps > 7;
+  const stepWidth = isScrollable ? 160 : 1000 / numSteps;
+  const totalWidth = numSteps * stepWidth;
+  const height = 240;
+
+  if (chartWrap) {
+    chartWrap.style.width = "100%";
+    chartWrap.style.minWidth = "0px";
+  }
+  if (canvas) {
+    canvas.style.width = isScrollable ? `${totalWidth}px` : "100%";
+    canvas.style.minWidth = isScrollable ? `${totalWidth}px` : "100%";
+  }
+
+  let svgPaths = `
+    <defs>
+      <linearGradient id="funnel-grad-primary" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%" stop-color="#2d8a4e" stop-opacity="0.95" />
+        <stop offset="100%" stop-color="#4ade80" stop-opacity="0.75" />
+      </linearGradient>
+      <linearGradient id="funnel-grad-subsequent" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%" stop-color="#4ade80" stop-opacity="0.55" />
+        <stop offset="100%" stop-color="#86efac" stop-opacity="0.25" />
+      </linearGradient>
+    </defs>
+  `;
+
+  steps.forEach((s, i) => {
+    const nextS = steps[i + 1];
+    const leftX = i * stepWidth;
+    const rightX = (i + 1) * stepWidth;
+
+    const leftRatio = Math.max(0.02, s.count / cohort);
+    const rightRatio = nextS ? Math.max(0.02, nextS.count / cohort) : leftRatio;
+
+    const leftH = height * leftRatio;
+    const rightH = height * rightRatio;
+
+    const leftTop = (height - leftH) / 2;
+    const leftBot = leftTop + leftH;
+    const rightTop = (height - rightH) / 2;
+    const rightBot = rightTop + rightH;
+
+    const points = `${leftX},${leftTop} ${rightX},${rightTop} ${rightX},${rightBot} ${leftX},${leftBot}`;
+    const fill = i === 0 ? "url(#funnel-grad-primary)" : "url(#funnel-grad-subsequent)";
+
+    const fbTipText = `${s.name}: ${s.count} (${s.pctTotal}% of cohort) · ${s.pctPrevious}% from previous step`;
+    svgPaths += `<polygon class="funnel-polygon" points="${points}" fill="${fill}" data-feedback="${escapeHtml(fbTipText)}" />`;
+
+    if (i < numSteps - 1) {
+      svgPaths += `<line x1="${rightX}" y1="0" x2="${rightX}" y2="${height}" stroke="rgba(255,255,255,0.14)" stroke-width="1.5" stroke-dasharray="3" />`;
+    }
+  });
+
+  svgPaths += `<text x="24" y="${height / 2}" dominant-baseline="central" text-anchor="start" font-family="Inter, system-ui, sans-serif" font-size="54" font-weight="900" fill="#ffffff" style="filter: drop-shadow(0 4px 12px rgba(0,0,0,0.95)); pointer-events: none;">${cohort}</text>`;
+
+  if (svg) {
+    svg.setAttribute("viewBox", `0 0 ${totalWidth} ${height}`);
+    svg.style.width = `${totalWidth}px`;
+    svg.innerHTML = svgPaths;
+  }
+
+  if (labelsHost) {
+    labelsHost.style.width = `${totalWidth}px`;
+    labelsHost.innerHTML = steps
+      .map(
+        (s, i) => `<div class="funnel-stage-col ${i === 0 ? "is-first" : ""}" style="width: ${stepWidth}px;">
+          <div class="funnel-stage-top">
+            <span class="funnel-stage-name">${escapeHtml(s.name)}</span>
+          </div>
+          <div class="funnel-stage-bot">
+            ${i === 0 ? "" : `<span class="funnel-stage-pct">${s.pctPrevious}%</span><span class="funnel-stage-count">${s.count}</span>`}
+          </div>
+        </div>`
+      )
+      .join("");
+  }
+
+  if (cardsHost) {
+    cardsHost.innerHTML = steps
+      .map(
+        (s) => `<div class="funnel-step-card">
+          <span class="funnel-step-num">Step ${s.step}</span>
+          <span class="funnel-step-title">${escapeHtml(s.name)}</span>
+          <span class="funnel-step-desc">${escapeHtml(s.desc || "Tracked funnel event progression.")}</span>
+          <div class="funnel-step-stats">
+            <span class="funnel-step-count">${s.count}</span>
+            <span class="funnel-step-rate">${s.pctTotal}% total</span>
+          </div>
+        </div>`
+      )
+      .join("");
+  }
+}
+
 function startDashboard() {
   if (state.pollTimer) clearInterval(state.pollTimer);
+  initFeedbackTooltip();
   renderKeyPanel();
   refreshStats();
+  loadFunnels();
   // Auto-crunch feedback the moment a game opens (and on hot reload), so the
   // summary is populated without waiting for a click. Button still re-runs it.
   const game = currentGame();

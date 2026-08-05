@@ -212,6 +212,17 @@ function Telemetry.SubmitFeedback(player: Player, content: string)
 	table.insert(buffer.feedback, { content = string.sub(content, 1, 2000) })
 end
 
+function Telemetry.FunnelStep(player: Player, stepNumber: number, eventName: string, description: string?)
+	if typeof(stepNumber) ~= "number" or typeof(eventName) ~= "string" then
+		return
+	end
+	Telemetry.Track(player, "funnel_step", {
+		step = stepNumber,
+		name = eventName,
+		desc = description or "",
+	})
+end
+
 function Telemetry.EndSession(player: Player)
 	local buffer = buffers[player]
 	if not buffer then
