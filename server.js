@@ -39,20 +39,33 @@ async function ensureDemoWorkspace() {
   if (stats.overview(demoGame.id).events > 0) return;
 
   const servers = ["srv-us-east-01", "srv-eu-west-02", "srv-ap-southeast-03"];
+  // Spread the 15 demo sessions across the last ~4 weeks so the Overall chart
+  // shows a real dated timeline (with quiet days) instead of one instant. Each
+  // entry is "days ago"; clustering several sessions on some days and leaving
+  // others empty gives the line natural peaks and valleys.
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const daysAgo = [27, 27, 25, 22, 22, 20, 18, 15, 15, 13, 10, 7, 7, 4, 1];
+  const baseNow = Date.now();
   for (let session = 0; session < 15; session++) {
     const events = [{ name: "session_started", properties: { place_version: 42 } }];
     for (let event = 0; event < 6 + (session % 4); event++) {
       const name = DEMO_EVENT_NAMES[(session + event) % DEMO_EVENT_NAMES.length];
       events.push({ name, properties: { level: 1 + ((session + event) % 5) } });
     }
-    ingest(demoGame.id, {
-      session_id: `demo-session-${session + 1}`,
-      player_id: 100000 + session,
-      server_id: servers[session % servers.length],
-      events,
-      feedback: session % 2 === 0 ? [{ content: DEMO_FEEDBACK[session % DEMO_FEEDBACK.length] }] : [],
-      ended: true,
-    });
+    // backdate the whole batch to its assigned day (spread within the day a bit)
+    const serverTs = baseNow - daysAgo[session] * DAY_MS + (session % 6) * 90 * 60 * 1000;
+    ingest(
+      demoGame.id,
+      {
+        session_id: `demo-session-${session + 1}`,
+        player_id: 100000 + session,
+        server_id: servers[session % servers.length],
+        events,
+        feedback: session % 2 === 0 ? [{ content: DEMO_FEEDBACK[session % DEMO_FEEDBACK.length] }] : [],
+        ended: true,
+      },
+      { serverTs }
+    );
   }
 }
 

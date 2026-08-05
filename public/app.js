@@ -285,6 +285,15 @@ $("filter-clear").addEventListener("click", () => {
   refreshStats();
 });
 
+// chart drag-zoom sets the date range; this clears just the dates back to full history
+$("chart-reset").addEventListener("click", () => {
+  state.filters.from = "";
+  state.filters.to = "";
+  $("filter-from").value = "";
+  $("filter-to").value = "";
+  refreshStats();
+});
+
 // ---------- events table: sorting ----------
 document.querySelectorAll(".et-head .sortable").forEach((h) =>
   h.addEventListener("click", () => {
@@ -454,50 +463,72 @@ function renderStream() {
 }
 
 // ---------- overall: events-over-time chart ----------
+const isoDate = (t) => new Date(t).toISOString().slice(0, 10); // UTC YYYY-MM-DD
+function fmtChart(t, unit, long) {
+  const d = new Date(t);
+  if (unit === "day")
+    return d.toLocaleDateString([], {
+      weekday: long ? "short" : undefined,
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    });
+  return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
 function renderChart(series) {
   const host = $("events-chart");
   const hint = $("chart-hint");
+  const resetBtn = $("chart-reset");
   const buckets = (series && series.buckets) || [];
+  const zoomed = !!(state.filters.from || state.filters.to);
+  resetBtn.classList.toggle("hidden", !zoomed);
+
+  // tear down the previous chart's window-level drag listener before redrawing
+  if (host._chartCleanup) host._chartCleanup();
+
   if (buckets.length === 0) {
     host.innerHTML = `<div class="stream-empty">No events in this range yet.</div>`;
     hint.textContent = "";
     return;
   }
 
-  const W = 640;
-  const H = 180;
-  const padL = 34;
-  const padR = 10;
-  const padT = 12;
-  const padB = 22;
+  const unit = series.unit || "time";
+  const W = 860, H = 220, padL = 38, padR = 16, padT = 16, padB = 30;
   const innerW = W - padL - padR;
   const innerH = H - padT - padB;
-
-  const maxCount = Math.max(1, ...buckets.map((b) => b.count));
   const n = buckets.length;
+  const maxCount = Math.max(1, ...buckets.map((b) => b.count));
+
   const x = (i) => padL + (n === 1 ? innerW / 2 : (i / (n - 1)) * innerW);
   const y = (c) => padT + innerH - (c / maxCount) * innerH;
 
   const linePts = buckets.map((b, i) => `${x(i)},${y(b.count)}`).join(" ");
-  const areaPts = `${padL},${padT + innerH} ${linePts} ${x(n - 1)},${padT + innerH}`;
+  const areaPts = `${x(0)},${padT + innerH} ${linePts} ${x(n - 1)},${padT + innerH}`;
 
-  // y gridlines at 0, mid, max
-  const yTicks = [0, Math.round(maxCount / 2), maxCount];
+  const yTicks = [...new Set([0, Math.round(maxCount / 2), maxCount])];
   const grid = yTicks
     .map(
       (v) =>
         `<line x1="${padL}" y1="${y(v)}" x2="${W - padR}" y2="${y(v)}" class="grid" />` +
-        `<text x="${padL - 6}" y="${y(v) + 3}" class="ytick">${v}</text>`
+        `<text x="${padL - 8}" y="${y(v) + 3}" class="ytick">${v}</text>`
     )
     .join("");
 
-  const dots = buckets
-    .map((b, i) => `<circle cx="${x(i)}" cy="${y(b.count)}" r="2.2" class="dot"><title>${b.count} events</title></circle>`)
+  // up to ~7 evenly spaced dated x-axis ticks
+  const maxTicks = Math.min(7, n);
+  const step = maxTicks <= 1 ? 0 : (n - 1) / (maxTicks - 1);
+  const tickIdx = [...new Set(Array.from({ length: maxTicks }, (_, k) => Math.round(k * step)))];
+  const xticks = tickIdx
+    .map((i) => {
+      const anchor = i === 0 ? "start" : i === n - 1 ? "end" : "middle";
+      return `<text x="${x(i)}" y="${H - 8}" class="xtick" text-anchor="${anchor}">${escapeHtml(fmtChart(buckets[i].t, unit))}</text>`;
+    })
     .join("");
 
-  const fmt = (t) => new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-  const xStart = fmt(buckets[0].t);
-  const xEnd = fmt(buckets[n - 1].t);
+  const dots = buckets
+    .map((b, i) => `<circle cx="${x(i)}" cy="${y(b.count)}" r="2.6" class="dot" />`)
+    .join("");
 
   host.innerHTML = `
     <svg viewBox="0 0 ${W} ${H}" class="chart-svg" preserveAspectRatio="none" role="img" aria-label="Events over time">
@@ -511,11 +542,93 @@ function renderChart(series) {
       <polygon points="${areaPts}" fill="url(#areaGrad)" />
       <polyline points="${linePts}" class="chart-line" />
       ${dots}
-      <text x="${padL}" y="${H - 6}" class="xtick">${escapeHtml(xStart)}</text>
-      <text x="${W - padR}" y="${H - 6}" class="xtick end">${escapeHtml(xEnd)}</text>
-    </svg>`;
+      <rect class="chart-sel hidden" y="${padT}" height="${innerH}" />
+      <line class="chart-cursor hidden" y1="${padT}" y2="${padT + innerH}" />
+      <circle class="chart-focus hidden" r="4" />
+      <rect class="chart-capture" x="${padL}" y="${padT}" width="${innerW}" height="${innerH}" />
+      ${xticks}
+    </svg>
+    <div class="chart-tip hidden"></div>`;
+
   const totalEv = buckets.reduce((a, b) => a + b.count, 0);
-  hint.textContent = `${totalEv} events`;
+  hint.textContent = `${totalEv} event${totalEv === 1 ? "" : "s"}`;
+
+  // ---- interactivity: hover tooltip + drag-to-zoom ----
+  const svg = host.querySelector("svg");
+  const cap = svg.querySelector(".chart-capture");
+  const cursor = svg.querySelector(".chart-cursor");
+  const focus = svg.querySelector(".chart-focus");
+  const sel = svg.querySelector(".chart-sel");
+  const tip = host.querySelector(".chart-tip");
+
+  const svgX = (clientX) => {
+    const r = svg.getBoundingClientRect();
+    return r.width ? ((clientX - r.left) / r.width) * W : padL;
+  };
+  const idxAt = (clientX) => {
+    const sx = Math.max(padL, Math.min(padL + innerW, svgX(clientX)));
+    const frac = innerW ? (sx - padL) / innerW : 0;
+    return Math.max(0, Math.min(n - 1, Math.round(frac * (n - 1))));
+  };
+
+  function showTip(i) {
+    const b = buckets[i];
+    cursor.setAttribute("x1", x(i));
+    cursor.setAttribute("x2", x(i));
+    focus.setAttribute("cx", x(i));
+    focus.setAttribute("cy", y(b.count));
+    cursor.classList.remove("hidden");
+    focus.classList.remove("hidden");
+    tip.innerHTML =
+      `<span class="tip-count">${b.count} event${b.count === 1 ? "" : "s"}</span>` +
+      `<span class="tip-date">${escapeHtml(fmtChart(b.t, unit, true))}</span>`;
+    tip.classList.remove("hidden");
+    const frac = x(i) / W;
+    tip.style.left = frac * 100 + "%";
+    tip.classList.toggle("flip", frac > 0.6);
+  }
+  function hideTip() {
+    cursor.classList.add("hidden");
+    focus.classList.add("hidden");
+    tip.classList.add("hidden");
+  }
+
+  let drag = null; // { clientX, i }
+  cap.addEventListener("mousemove", (e) => {
+    showTip(idxAt(e.clientX));
+    if (drag) {
+      const a = Math.max(padL, Math.min(svgX(drag.clientX), svgX(e.clientX)));
+      const b = Math.min(padL + innerW, Math.max(svgX(drag.clientX), svgX(e.clientX)));
+      sel.setAttribute("x", a);
+      sel.setAttribute("width", Math.max(0, b - a));
+      sel.classList.remove("hidden");
+    }
+  });
+  cap.addEventListener("mouseleave", () => {
+    if (!drag) hideTip();
+  });
+  cap.addEventListener("mousedown", (e) => {
+    drag = { clientX: e.clientX, i: idxAt(e.clientX) };
+    e.preventDefault();
+  });
+
+  function onUp(e) {
+    if (!drag) return;
+    const lo = Math.min(drag.i, idxAt(e.clientX));
+    const hi = Math.max(drag.i, idxAt(e.clientX));
+    drag = null;
+    sel.classList.add("hidden");
+    if (hi - lo < 1) return; // ignore clicks / tiny drags
+    const from = isoDate(buckets[lo].t);
+    const to = isoDate(buckets[hi].t);
+    state.filters.from = from;
+    state.filters.to = to;
+    $("filter-from").value = from;
+    $("filter-to").value = to;
+    refreshStats();
+  }
+  window.addEventListener("mouseup", onUp);
+  host._chartCleanup = () => window.removeEventListener("mouseup", onUp);
 }
 
 // ---------- connection panel ----------

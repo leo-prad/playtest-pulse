@@ -249,15 +249,39 @@ body {
 #tab-connection .grid { grid-template-columns: minmax(0, 480px); }
 
 /* ---------- events-over-time chart ---------- */
+.chart-head-right { display: flex; align-items: center; gap: 10px; }
 .chart-hint { font-family: var(--mono); font-size: 12px; color: var(--muted); }
-.chart { width: 100%; }
-.chart-svg { width: 100%; height: 180px; display: block; }
+.chart-reset {
+  font-family: var(--mono); font-size: 11px; color: var(--signal);
+  background: transparent; border: 1px solid var(--border); border-radius: 6px;
+  padding: 3px 9px; cursor: pointer; transition: border-color 0.15s ease;
+}
+.chart-reset:hover { border-color: var(--signal); }
+.chart { width: 100%; position: relative; }
+.chart-svg { width: 100%; height: 220px; display: block; }
 .chart-line { fill: none; stroke: var(--signal); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-.chart .dot { fill: var(--signal); }
+.chart .dot { fill: var(--signal); pointer-events: none; }
 .chart .grid { stroke: var(--border); stroke-width: 1; }
-.chart .ytick { fill: var(--muted); font-family: var(--mono); font-size: 9px; text-anchor: end; }
-.chart .xtick { fill: var(--muted); font-family: var(--mono); font-size: 9px; }
-.chart .xtick.end { text-anchor: end; }
+.chart .ytick { fill: var(--muted); font-family: var(--mono); font-size: 11px; text-anchor: end; pointer-events: none; }
+.chart .xtick { fill: var(--muted); font-family: var(--mono); font-size: 11px; pointer-events: none; }
+
+/* interaction layer */
+.chart-capture { fill: transparent; cursor: crosshair; }
+.chart-cursor { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
+.chart-focus { fill: var(--signal); stroke: var(--panel); stroke-width: 2; pointer-events: none; }
+.chart-sel { fill: rgba(255, 179, 56, 0.14); stroke: var(--signal); stroke-opacity: 0.45; stroke-width: 1; pointer-events: none; }
+
+/* hover tooltip (HTML overlay) */
+.chart-tip {
+  position: absolute; top: 6px; left: 0; transform: translateX(-50%);
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 9px; pointer-events: none; white-space: nowrap;
+  display: flex; flex-direction: column; gap: 1px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45); z-index: 2;
+}
+.chart-tip.flip { transform: translateX(-100%); }
+.chart-tip .tip-count { color: var(--text); font-weight: 700; font-size: 13px; }
+.chart-tip .tip-date { color: var(--muted); font-family: var(--mono); font-size: 11px; }
 
 /* ---------- events table (columns) ---------- */
 .head-actions { display: flex; align-items: center; gap: 12px; }

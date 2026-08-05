@@ -124,8 +124,11 @@ export const games = {
 
 // ---- ingestion (sessions / events / feedback) ----
 // Stage all rows, then commit + persist once: all-or-nothing per batch.
-export function ingest(gameId, batch) {
-  const serverTs = now();
+// `opts.serverTs` lets trusted server-side callers (the demo seed) backdate a
+// batch so the sample data spans real days. The HTTP ingestion route never
+// passes it, so a client can never forge the server-authoritative timestamp.
+export function ingest(gameId, batch, opts = {}) {
+  const serverTs = typeof opts.serverTs === "number" ? opts.serverTs : now();
   const sid = batch.session_id || uuid();
   const playerRef = hashPlayer(gameId, batch.player_id ?? "anon");
 
@@ -197,12 +200,19 @@ const SERIES_BUCKETS = 40; // resolution of the Overall time-vs-events chart
 
 const tsOf = (e) => (typeof e.server_ts === "number" ? e.server_ts : Date.parse(e.server_ts));
 
-// Bucket events over time into a small series the frontend can chart. Returns
-// evenly spaced buckets between the first and last event so the x-axis is real
-// wall-clock time. A degenerate span (all events at once) collapses to a single
-// bucket rather than dividing by zero.
+const DAY_MS = 24 * 60 * 60 * 1000;
+const dayStart = (t) => Math.floor(t / DAY_MS) * DAY_MS; // UTC midnight of t
+
+// Bucket events over time into a small series the frontend can chart.
+//
+// When the data spans two or more days we bucket by calendar day (UTC) so the
+// x-axis reads as real dates (Jul 10, Jul 11, ...) with one point per day and
+// no gaps — empty days show as zero. For a tighter span we fall back to evenly
+// spaced sub-day buckets. `unit` tells the frontend how to label ticks; `start`
+// / `end` are the real event bounds. A degenerate span (all events at once)
+// collapses to a single bucket rather than dividing by zero.
 function buildSeries(evs) {
-  if (evs.length === 0) return { buckets: [], bucketMs: 0, start: null, end: null };
+  if (evs.length === 0) return { buckets: [], unit: "time", start: null, end: null };
   let min = Infinity;
   let max = -Infinity;
   for (const e of evs) {
@@ -211,8 +221,19 @@ function buildSeries(evs) {
     if (t > max) max = t;
   }
   const span = max - min;
-  if (span <= 0) return { buckets: [{ t: min, count: evs.length }], bucketMs: 1, start: min, end: min };
+  if (span <= 0) return { buckets: [{ t: min, count: evs.length }], unit: "time", start: min, end: max };
 
+  // multi-day span -> one bucket per calendar day, including empty days
+  if (span >= 2 * DAY_MS) {
+    const first = dayStart(min);
+    const last = dayStart(max);
+    const n = Math.round((last - first) / DAY_MS) + 1;
+    const buckets = Array.from({ length: n }, (_, i) => ({ t: first + i * DAY_MS, count: 0 }));
+    for (const e of evs) buckets[Math.round((dayStart(tsOf(e)) - first) / DAY_MS)].count++;
+    return { buckets, unit: "day", start: min, end: max };
+  }
+
+  // tight span -> evenly spaced sub-day buckets on real wall-clock time
   const bucketMs = Math.max(1, Math.ceil(span / SERIES_BUCKETS));
   const n = Math.floor(span / bucketMs) + 1;
   const buckets = Array.from({ length: n }, (_, i) => ({ t: min + i * bucketMs, count: 0 }));
@@ -220,7 +241,7 @@ function buildSeries(evs) {
     const idx = Math.min(n - 1, Math.floor((tsOf(e) - min) / bucketMs));
     buckets[idx].count++;
   }
-  return { buckets, bucketMs, start: min, end: max };
+  return { buckets, unit: "time", start: min, end: max };
 }
 
 export const stats = {
