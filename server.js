@@ -12,6 +12,7 @@ import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import { Strategy as GitHubStrategy } from "passport-github2";
 import rateLimit from "express-rate-limit";
+import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,8 +20,12 @@ import { users, games, ingest, stats } from "./db.js";
 import { hashPassword, verifyPassword, signToken, requireAuth } from "./auth.js";
 import { summarizeFeedback } from "./summarize.js";
 
-const DEMO_EMAIL = "demo@playtestpulse.dev";
-const DEMO_PASSWORD = "demopassword123";
+// Legacy shared demo account. We used to keep this alive with fixed credentials
+// so anyone could poke around, but that made the account a shared canvas:
+// anyone who logged in could rename games, and the names showed up for every
+// other visitor. On first boot after this change we nuke it, and new visitors
+// get a private per-browser sandbox via POST /api/auth/demo instead.
+const LEGACY_DEMO_EMAIL = "demo@playtestpulse.dev";
 
 // Scenario templates give the demo realistic playtests instead of random noise:
 // boss rage-quits, clean clears, mid-run deaths, early bail-outs. Each is an
@@ -57,14 +62,12 @@ const DEMO_SCENARIOS = [
   },
 ];
 
-async function ensureDemoWorkspace() {
-  let demoUser = users.byEmail(DEMO_EMAIL);
-  if (!demoUser) demoUser = users.create(DEMO_EMAIL, await hashPassword(DEMO_PASSWORD));
-
-  let demoGame = games.byUser(demoUser.id).find((game) => game.name === "Dungeon Crawler (Demo)");
-  if (!demoGame) demoGame = games.create(demoUser.id, "Dungeon Crawler (Demo)");
-  if (stats.overview(demoGame.id).events > 0) return;
-
+// Seed a "Dungeon Crawler (Demo)" workspace for a specific user. Called by
+// the per-browser demo endpoint so every visitor gets an isolated copy of
+// the same realistic playtest data. No shared state — one user's edits can
+// never affect another's view.
+function seedDemoWorkspace(userId) {
+  const demoGame = games.create(userId, "Dungeon Crawler (Demo)");
   const servers = ["srv-us-east-01", "srv-eu-west-02", "srv-ap-southeast-03"];
   const REGIONS = { "srv-us-east-01": "US East", "srv-eu-west-02": "EU West", "srv-ap-southeast-03": "Asia Pacific" };
   // Spread sessions across the last ~4 weeks so the Overall chart shows a real
@@ -78,14 +81,10 @@ async function ensureDemoWorkspace() {
   const baseNow = Date.now();
   for (let session = 0; session < daysAgo.length; session++) {
     const scenario = DEMO_SCENARIOS[plan[session]];
-    // backdate the batch to its assigned day; server_ts (used by the Overall
-    // day chart) is this instant for the whole batch.
     const sessionStart = baseNow - daysAgo[session] * DAY_MS + (session % 6) * 90 * MIN;
-    // give each event its own client_ts a little later than the last, so the
-    // replay timeline spreads out and rage bursts are measurable.
     let cursor = sessionStart;
     const events = scenario.events.map((name, i) => {
-      if (i > 0) cursor += 20 * 1000 + ((session + i) % 4) * 15 * 1000; // 20–65s apart
+      if (i > 0) cursor += 20 * 1000 + ((session + i) % 4) * 15 * 1000;
       return {
         name,
         client_ts: cursor,
@@ -108,9 +107,19 @@ async function ensureDemoWorkspace() {
       { serverTs: sessionStart }
     );
   }
+  return demoGame;
 }
 
-await ensureDemoWorkspace();
+// One-time cleanup: kill the legacy shared demo account so it stops being a
+// public canvas anyone can rename. Cascades to its games/sessions/events/
+// feedback. Safe to run every boot — no-op once it's already gone.
+{
+  const legacy = users.byEmail(LEGACY_DEMO_EMAIL);
+  if (legacy) {
+    users.remove(legacy.id);
+    console.log("Removed legacy shared demo account.");
+  }
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -188,6 +197,35 @@ app.post("/api/auth/signup", async (req, res) => {
 
   const user = users.create(email, await hashPassword(password));
   res.json({ token: signToken(user), email: user.email });
+});
+
+// Rate-limit demo-account creation so a single visitor (or a bot) can't
+// spam thousands of throwaway users. 10 per IP per hour is plenty for
+// legitimate use; a real dev signs up for a permanent account.
+const demoLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many demo accounts created from this IP. Try again in an hour or sign up for a real account." },
+});
+
+app.post("/api/auth/demo", demoLimiter, async (req, res) => {
+  // Every click gets its own throwaway user with an unguessable email and an
+  // unrecoverable password (they're never meant to log back in with these —
+  // we hand them a JWT immediately). Cleanup of old demo users can be added
+  // later; a demo=true flag makes them easy to sweep.
+  const suffix = crypto.randomBytes(6).toString("hex");
+  const email = `demo-${suffix}@playtestpulse.dev`;
+  const password = crypto.randomBytes(24).toString("hex");
+  const user = users.create(email, await hashPassword(password));
+  try {
+    seedDemoWorkspace(user.id);
+  } catch (err) {
+    users.remove(user.id); // don't leave an empty account behind
+    return res.status(500).json({ error: "Could not seed demo workspace: " + err.message });
+  }
+  res.json({ token: signToken(user), email: user.email, demo: true });
 });
 
 app.post("/api/auth/login", async (req, res) => {

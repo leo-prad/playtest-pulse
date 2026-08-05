@@ -95,6 +95,15 @@ body {
 }
 .auth-card input:focus { outline: none; border-color: var(--signal); }
 .auth-card .btn.primary { width: 100%; margin-top: 4px; padding: 12px; }
+.auth-card .btn.demo {
+  width: 100%; margin-top: 12px; padding: 12px;
+  background: transparent; color: var(--signal); border-color: var(--signal-dim);
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+}
+.auth-card .btn.demo:hover { border-color: var(--signal); background: rgba(255,179,56,0.06); }
+.auth-card .btn.demo .demo-arrow { transition: transform .15s ease; }
+.auth-card .btn.demo:hover .demo-arrow { transform: translateX(3px); }
+.auth-card .btn.demo:disabled { opacity: 0.6; cursor: default; }
 .switch { margin: 16px 0 0; font-size: 13px; color: var(--muted); text-align: center; }
 .switch a { color: var(--signal); text-decoration: none; }
 .switch a:hover { text-decoration: underline; }

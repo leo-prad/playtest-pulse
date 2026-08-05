@@ -62,6 +62,24 @@ export const users = {
   },
   byEmail: (email) => data.users.find((u) => u.email === email),
   byId: (id) => data.users.find((u) => u.id === id),
+  // Delete a user and cascade-delete every game (and each game's sessions,
+  // events, and feedback) they own. Used by the demo cleanup path to nuke the
+  // legacy shared account, and future account-deletion flows can reuse it.
+  remove(userId) {
+    const before = data.users.length;
+    data.users = data.users.filter((u) => u.id !== userId);
+    if (data.users.length === before) return false;
+    const gameIds = data.games.filter((g) => g.user_id === userId).map((g) => g.id);
+    if (gameIds.length) {
+      const gameSet = new Set(gameIds);
+      data.games = data.games.filter((g) => !gameSet.has(g.id));
+      data.sessions = data.sessions.filter((s) => !gameSet.has(s.game_id));
+      data.events = data.events.filter((e) => !gameSet.has(e.game_id));
+      data.feedback = data.feedback.filter((f) => !gameSet.has(f.game_id));
+    }
+    persist();
+    return true;
+  },
   findOrCreateOAuth({ email, provider, providerId, displayName }) {
     let user = data.users.find((u) => u.oauth?.[provider]?.id === providerId);
     if (!user) user = data.users.find((u) => u.email === email);

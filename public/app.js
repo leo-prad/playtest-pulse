@@ -118,6 +118,28 @@ $("auth-submit").addEventListener("click", async () => {
   })
 );
 
+// Try the demo → one-click throwaway account with sample data. Each click
+// creates a fresh, isolated user server-side; nothing is shared between
+// visitors, and the token lives only in this browser's localStorage.
+$("demo-btn").addEventListener("click", async () => {
+  const err = $("auth-error");
+  const btn = $("demo-btn");
+  err.classList.add("hidden");
+  btn.disabled = true;
+  const original = btn.innerHTML;
+  btn.textContent = "Spinning up your demo…";
+  try {
+    const data = await api("/api/auth/demo", { method: "POST", auth: false });
+    storeToken(data.token);
+    await enterApp();
+  } catch (e) {
+    err.textContent = e.message;
+    err.classList.remove("hidden");
+    btn.disabled = false;
+    btn.innerHTML = original;
+  }
+});
+
 $("logout-btn").addEventListener("click", () => {
   clearSession();
   if (state.pollTimer) clearInterval(state.pollTimer);
