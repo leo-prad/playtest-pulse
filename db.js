@@ -273,7 +273,7 @@ function buildSeries(evs) {
 }
 
 export const stats = {
-  overview(gameId, { from, to } = {}) {
+  overview(gameId, { from, to, serverId, placeVersion } = {}) {
     const rangeStart = from ? Date.parse(`${from}T00:00:00.000Z`) : null;
     const rangeEnd = to ? Date.parse(`${to}T23:59:59.999Z`) : null;
     const eventInRange = (event) => {
@@ -281,23 +281,50 @@ export const stats = {
         typeof event.server_ts === "number" ? event.server_ts : Date.parse(event.server_ts);
       return (!rangeStart || time >= rangeStart) && (!rangeEnd || time <= rangeEnd);
     };
-    const evs = data.events.filter((e) => e.game_id === gameId && eventInRange(e));
-    const gameSessions = data.sessions.filter((s) => s.game_id === gameId);
+    let evs = data.events.filter((e) => e.game_id === gameId && eventInRange(e));
+    let gameSessions = data.sessions.filter((s) => s.game_id === gameId);
 
-    // session_id -> { player_ref, server_id } so each event can be attributed
-    // to a player and a server instance without duplicating those on the event.
+    // session_id -> { player_ref, server_id, place_version }
     const sessionMeta = new Map();
-    for (const s of gameSessions)
-      sessionMeta.set(s.id, { player_ref: s.player_ref, server_id: s.server_id || "studio" });
+    const versionCounts = new Map();
 
-    // full-history event-name counts (drives the Overall page)
+    for (const s of gameSessions) {
+      const sEvs = data.events.filter((e) => e.session_id === s.id);
+      let ver = null;
+      for (const e of sEvs) {
+        if (e.properties && (e.properties.place_version !== undefined || e.properties.version !== undefined)) {
+          ver = String(e.properties.place_version ?? e.properties.version);
+          break;
+        }
+      }
+      if (ver) versionCounts.set(ver, (versionCounts.get(ver) || 0) + 1);
+      sessionMeta.set(s.id, { player_ref: s.player_ref, server_id: s.server_id || "studio", place_version: ver });
+    }
+
+    if (serverId) {
+      gameSessions = gameSessions.filter((s) => (s.server_id || "studio") === serverId);
+      const validSids = new Set(gameSessions.map((s) => s.id));
+      evs = evs.filter((e) => validSids.has(e.session_id));
+    }
+
+    if (placeVersion) {
+      const validSids = new Set(
+        [...sessionMeta.entries()]
+          .filter(([, meta]) => String(meta.place_version) === String(placeVersion))
+          .map(([sid]) => sid)
+      );
+      gameSessions = gameSessions.filter((s) => validSids.has(s.id));
+      evs = evs.filter((e) => validSids.has(e.session_id));
+    }
+
+    // full-history event-name counts
     const counts = new Map();
     for (const e of evs) counts.set(e.name, (counts.get(e.name) || 0) + 1);
     const topEvents = [...counts.entries()]
       .map(([name, n]) => ({ name, n }))
       .sort((a, b) => b.n - a.n);
 
-    // distinct players / servers with session counts — these populate the filters
+    // distinct players / servers / versions
     const playerCounts = new Map();
     const serverCounts = new Map();
     for (const s of gameSessions) {
@@ -307,8 +334,8 @@ export const stats = {
     }
     const players = [...playerCounts.entries()].map(([player_ref, sessions]) => ({ player_ref, sessions }));
     const servers = [...serverCounts.entries()].map(([server_id, sessions]) => ({ server_id, sessions }));
+    const versions = [...versionCounts.entries()].map(([version, sessions]) => ({ version, sessions }));
 
-    // recent events, each attributed to its player + server for grouping/filtering
     const recentEvents = evs
       .slice(-RECENT_WINDOW)
       .reverse()
@@ -324,8 +351,6 @@ export const stats = {
         };
       });
 
-    // time-vs-events series for the Overall chart. Bucket every in-range event
-    // by server_ts into ~40 evenly spaced slots between the first and last event.
     const series = buildSeries(evs);
 
     return {
@@ -335,26 +360,18 @@ export const stats = {
       eventNames: topEvents.map((t) => t.name),
       players,
       servers,
+      versions,
       topEvents,
       recentEvents,
       series,
       range: { from: from || null, to: to || null },
     };
   },
-  // Per-session detail for the Sessions tab. For each session we return its
-  // ordered event sequence, any linked feedback, and derived "struggle" signals
-  // (deaths, rage bursts, rage-quits) plus a headline score used to rank the
-  // list. Also returns a drop-off aggregate (the last event of each session —
-  // "where did players stop?") and top-line health numbers. Honors the same
-  // from/to date range as overview(), so chart drag-zoom scopes this too.
-  sessions(gameId, { from, to } = {}) {
+  sessions(gameId, { from, to, serverId, placeVersion } = {}) {
     const rangeStart = from ? Date.parse(`${from}T00:00:00.000Z`) : null;
     const rangeEnd = to ? Date.parse(`${to}T23:59:59.999Z`) : null;
     const inRange = (t) => (!rangeStart || t >= rangeStart) && (!rangeEnd || t <= rangeEnd);
 
-    // Effective time of an event/feedback row: prefer the client's claimed
-    // moment (client_ts) so a session's own events spread out on the replay
-    // timeline, and fall back to the server-observed time.
     const timeOf = (row) => {
       if (typeof row.client_ts === "number") return row.client_ts;
       if (typeof row.server_ts === "number") return row.server_ts;
@@ -378,6 +395,9 @@ export const stats = {
     const RAGE_WINDOW_MS = 2 * 60 * 1000;
     const RAGE_DEATHS = 3;
 
+    const versionMap = new Map();
+    const serverMap = new Map();
+
     const out = [];
     for (const s of data.sessions) {
       if (s.game_id !== gameId) continue;
@@ -388,6 +408,21 @@ export const stats = {
 
       const firstTs = events.length ? events[0].ts : s.started_at;
       if (!inRange(firstTs)) continue;
+
+      const sv = s.server_id || "studio";
+      serverMap.set(sv, (serverMap.get(sv) || 0) + 1);
+
+      let ver = null;
+      for (const e of events) {
+        if (e.properties && (e.properties.place_version !== undefined || e.properties.version !== undefined)) {
+          ver = String(e.properties.place_version ?? e.properties.version);
+          break;
+        }
+      }
+      if (ver) versionMap.set(ver, (versionMap.get(ver) || 0) + 1);
+
+      if (serverId && sv !== serverId) continue;
+      if (placeVersion && ver !== String(placeVersion)) continue;
 
       const feedback = (fbBySession.get(s.id) || [])
         .map((f) => ({ content: f.content, ts: timeOf(f) }))
@@ -405,7 +440,6 @@ export const stats = {
       const lastTs = events.length ? events[events.length - 1].ts : s.ended_at || s.started_at;
       const duration = Math.max(0, lastTs - firstTs);
 
-      // biggest burst of deaths inside a 2-minute sliding window
       const deathTimes = events.filter((e) => e.name === "player_died").map((e) => e.ts);
       let rage = 0;
       for (let i = 0; i < deathTimes.length; i++) {
@@ -439,7 +473,8 @@ export const stats = {
       out.push({
         id: s.id,
         player_ref: s.player_ref,
-        server_id: s.server_id || "studio",
+        server_id: sv,
+        place_version: ver,
         region: s.region || null,
         started_at: firstTs,
         ended_at: s.ended_at,
@@ -456,10 +491,8 @@ export const stats = {
       });
     }
 
-    // rank by struggle, then most-recent first
     out.sort((a, b) => b.score - a.score || b.started_at - a.started_at);
 
-    // drop-off: how many sessions ended on each event
     const dropMap = new Map();
     for (const sess of out) {
       const key = sess.lastEvent || "—";
@@ -472,9 +505,14 @@ export const stats = {
     const struggling = out.filter((s) => s.struggling).length;
     const completedCount = out.filter((s) => s.completed).length;
 
+    const servers = [...serverMap.entries()].map(([server_id, count]) => ({ server_id, sessions: count }));
+    const versions = [...versionMap.entries()].map(([version, count]) => ({ version, sessions: count }));
+
     return {
       sessions: out,
       dropoff,
+      servers,
+      versions,
       health: {
         total: out.length,
         struggling,

@@ -19,7 +19,7 @@ const state = {
   tab: "overall",
   latest: null, // last stats payload, so filters re-render without a refetch
   revealKey: false,
-  filters: { event: "", player: "", server: "", from: "", to: "" },
+  filters: { event: "", player: "", server: "", version: "", from: "", to: "" },
   sort: { key: "time", dir: "desc" }, // Events table sort (time = newest first)
   cols: loadCols(), // which Events columns are visible (persisted)
   summarizedGameId: null, // game whose feedback we've already auto-crunched this session
@@ -299,6 +299,18 @@ $("filter-server").addEventListener("change", (e) => {
   state.filters.server = e.target.value;
   renderStream();
 });
+if ($("sess-filter-server")) {
+  $("sess-filter-server").addEventListener("change", (e) => {
+    state.filters.server = e.target.value;
+    loadSessions();
+  });
+}
+if ($("sess-filter-version")) {
+  $("sess-filter-version").addEventListener("change", (e) => {
+    state.filters.version = e.target.value;
+    loadSessions();
+  });
+}
 [$("filter-from"), $("filter-to")].forEach((el) =>
   el.addEventListener("change", () => {
     state.filters.from = $("filter-from").value;
@@ -722,6 +734,8 @@ async function loadSessions() {
     const params = new URLSearchParams();
     if (state.filters.from) params.set("from", state.filters.from);
     if (state.filters.to) params.set("to", state.filters.to);
+    if (state.filters.server) params.set("server", state.filters.server);
+    if (state.filters.version) params.set("version", state.filters.version);
     const suffix = params.size ? `?${params}` : "";
     state.sessions = await api(`/api/games/${game.id}/sessions${suffix}`);
   } catch {
@@ -730,9 +744,35 @@ async function loadSessions() {
   renderSessions();
 }
 
+function syncSessionFilterOptions(data) {
+  const sSel = $("sess-filter-server");
+  const vSel = $("sess-filter-version");
+  if (!sSel || !vSel) return;
+
+  const servers = data.servers || [];
+  const versions = data.versions || [];
+  const total = data.health?.total || (data.sessions ? data.sessions.length : 0);
+
+  sSel.innerHTML =
+    `<option value="">All servers (${total})</option>` +
+    servers
+      .map((v) => `<option value="${escapeHtml(v.server_id)}">${escapeHtml(serverLabel(v.server_id))} (${v.sessions})</option>`)
+      .join("");
+  sSel.value = state.filters.server || "";
+
+  vSel.innerHTML =
+    `<option value="">All versions (${total})</option>` +
+    versions
+      .map((v) => `<option value="${escapeHtml(v.version)}">v${escapeHtml(v.version)} (${v.sessions})</option>`)
+      .join("");
+  vSel.value = state.filters.version || "";
+}
+
 function renderSessions() {
   const data = state.sessions;
   if (!data) return;
+
+  syncSessionFilterOptions(data);
 
   // The dashboard polls every 3s. Re-rendering the list on every tick would
   // reset its scroll position and drop hover state, so only redraw when the
@@ -740,6 +780,8 @@ function renderSessions() {
   const sig = JSON.stringify([
     data.health,
     data.dropoff,
+    state.filters.server,
+    state.filters.version,
     data.sessions.map((s) => [s.id, s.score, s.events.length, s.feedback.length, s.outcome]),
   ]);
   if (sig === state._sessSig) return;
