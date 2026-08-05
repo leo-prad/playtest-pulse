@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Playtest Pulse</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="pulse-dot" aria-hidden="true"></span>
+      <span class="wordmark">PLAYTEST<span class="thin"> / </span>PULSE</span>
+    </div>
+    <div id="session-controls" class="session-controls hidden">
+      <!-- custom game dropdown: pinned "New game" + per-row edit/delete -->
+      <div class="game-dropdown" id="game-dropdown">
+        <button class="dd-trigger" id="dd-trigger" aria-haspopup="true" aria-expanded="false">
+          <span id="dd-current">Select game</span>
+          <span class="dd-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="dd-menu hidden" id="dd-menu" role="menu">
+          <button class="dd-newgame" id="dd-newgame" role="menuitem">
+            <span class="dd-plus" aria-hidden="true">+</span> New game
+          </button>
+          <div class="dd-list" id="dd-list"></div>
+        </div>
+      </div>
+      <button id="logout-btn" class="btn ghost">Sign out</button>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- AUTH -->
+    <section id="auth-view" class="auth-view">
+      <div class="auth-card">
+        <h1 id="auth-title">Sign in</h1>
+        <p class="auth-sub" id="auth-sub">Track what actually happens in your playtests.</p>
+        <label>Email<input id="email" type="email" autocomplete="email" placeholder="you@studio.dev" /></label>
+        <label>Password<input id="password" type="password" autocomplete="current-password" placeholder="8+ characters" /></label>
+        <p id="auth-error" class="error hidden"></p>
+        <button id="auth-submit" class="btn primary">Sign in</button>
+        <div class="oauth-divider"><span>or continue with</span></div>
+        <div class="oauth-actions">
+          <a class="btn oauth" href="/api/auth/google"><span class="google-mark" aria-hidden="true">G</span>Google</a>
+          <a class="btn oauth" href="/api/auth/github"><svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.49c-2.23.48-2.7-.95-2.7-.95-.36-.93-.89-1.18-.89-1.18-.73-.5.06-.49.06-.49.8.06 1.23.83 1.23.83.72 1.22 1.87.87 2.33.66.07-.51.28-.87.51-1.07-1.78-.2-3.65-.88-3.65-3.94 0-.87.31-1.58.82-2.14-.08-.2-.36-1.01.08-2.11 0 0 .67-.21 2.2.82A7.7 7.7 0 0 1 8 4.8c.68 0 1.36.09 2 .27 1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.91.08 2.11.51.56.82 1.27.82 2.14 0 3.07-1.87 3.74-3.66 3.94.29.25.54.72.54 1.45v2.15c0 .21.15.46.55.38A8 8 0 0 0 8 0Z"/></svg>GitHub</a>
+        </div>
+        <p class="switch">
+          <span id="switch-text">New here?</span>
+          <a id="switch-link" href="#">Create an account</a>
+        </p>
+      </div>
+    </section>
+
+    <!-- EMPTY (no games) -->
+    <section id="empty-view" class="empty-view hidden">
+      <div class="empty-card">
+        <h2>No games yet</h2>
+        <p>Create your first game to get an API key and start collecting telemetry.</p>
+        <button id="empty-new-game" class="btn primary">Create a game</button>
+      </div>
+    </section>
+
+    <!-- DASHBOARD -->
+    <section id="dash-view" class="dash-view hidden">
+      <nav class="tabs" id="tabs">
+        <button class="tab active" data-tab="overall">Overall</button>
+        <button class="tab" data-tab="events">Events</button>
+        <button class="tab" data-tab="connection">Connection</button>
+      </nav>
+
+      <!-- OVERALL -->
+      <div id="tab-overall" class="tab-pane">
+        <div class="grid">
+          <div class="tile stat"><span class="stat-num" id="stat-sessions">0</span><span class="stat-label">Sessions</span></div>
+          <div class="tile stat"><span class="stat-num" id="stat-events">0</span><span class="stat-label">Events</span></div>
+          <div class="tile stat"><span class="stat-num" id="stat-feedback">0</span><span class="stat-label">Feedback</span></div>
+
+          <div class="tile chartcard">
+            <div class="tile-head">
+              <h3>Events over time</h3>
+              <span class="chart-hint" id="chart-hint"></span>
+            </div>
+            <div id="events-chart" class="chart"></div>
+          </div>
+
+          <div class="tile topevents">
+            <div class="tile-head"><h3>Most fired events</h3></div>
+            <ul id="top-events" class="bars"></ul>
+          </div>
+
+          <div class="tile feedback">
+            <div class="tile-head">
+              <h3>Feedback insights</h3>
+              <button id="summarize-btn" class="btn primary tiny">Summarize feedback</button>
+            </div>
+            <div id="summary-out" class="summary-out">
+              <p class="muted">Crunching feedback…</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- EVENTS -->
+      <div id="tab-events" class="tab-pane hidden">
+        <div class="tile stream-full">
+          <div class="tile-head">
+            <h3>Events</h3>
+            <div class="head-actions">
+              <span class="live-flag" id="live-flag">● live</span>
+              <div class="cols-wrap">
+                <button id="cols-btn" class="btn ghost tiny" aria-haspopup="true" aria-expanded="false">⚙ Columns</button>
+                <div id="cols-menu" class="cols-menu hidden" role="menu">
+                  <label><input type="checkbox" data-col="time" checked /> Time</label>
+                  <label><input type="checkbox" data-col="player" checked /> Player</label>
+                  <label><input type="checkbox" data-col="server" checked /> Server ID</label>
+                  <label><input type="checkbox" data-col="data" checked /> Data</label>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="filters">
+            <input id="filter-event" class="filter-input" placeholder="Search events…" />
+            <label class="date-filter">From <input id="filter-from" type="date" /></label>
+            <label class="date-filter">To <input id="filter-to" type="date" /></label>
+            <select id="filter-player" class="filter-select" aria-label="Filter by player"></select>
+            <select id="filter-server" class="filter-select" aria-label="Filter by server"></select>
+            <button id="filter-clear" class="btn ghost tiny">Clear</button>
+            <span class="filter-count" id="filter-count"></span>
+          </div>
+
+          <div class="events-table" id="events-table">
+            <div class="et-head">
+              <button class="et-cell col-time sortable" data-sort="time">Time <span class="sort-arrow"></span></button>
+              <span class="et-cell col-player">Player</span>
+              <button class="et-cell col-server sortable" data-sort="server">Server ID <span class="sort-arrow"></span></button>
+              <button class="et-cell col-event sortable" data-sort="event">Event <span class="sort-arrow"></span></button>
+              <span class="et-cell col-data">Data</span>
+            </div>
+            <div id="event-stream" class="et-body"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CONNECTION -->
+      <div id="tab-connection" class="tab-pane hidden">
+        <div class="grid">
+          <div class="tile keypanel">
+            <div class="tile-head">
+              <h3>Connection</h3>
+              <button id="rotate-key" class="btn ghost tiny">Rotate key</button>
+            </div>
+            <label class="field-label">Endpoint</label>
+            <code id="endpoint" class="codeline"></code>
+            <label class="field-label">API key</label>
+            <div class="keyrow">
+              <code id="api-key" class="codeline mono blurred"></code>
+              <button id="reveal-key" class="btn ghost tiny">Reveal</button>
+              <button id="copy-key" class="btn ghost tiny">Copy</button>
+            </div>
+            <p class="hint">Paste both into <code>Telemetry.Configure</code> in your game.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- reusable modal -->
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal" id="modal" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

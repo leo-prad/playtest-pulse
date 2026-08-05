@@ -1,0 +1,4 @@
+node_modules/
+pulse.data.json
+.env
+server.log

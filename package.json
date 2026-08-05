@@ -1,0 +1,25 @@
+{
+  "name": "playtest-pulse",
+  "version": "0.1.0",
+  "description": "Playtest telemetry + feedback analytics for game developers. Drop-in SDK, live dashboard, LLM feedback insights.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "seed": "node seed.js",
+    "reset": "node -e \"import('node:fs').then(fs=>{fs.rmSync(process.env.DB_PATH||'pulse.data.json',{force:true});console.log('database reset')})\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "express-session": "^1.19.0",
+    "jsonwebtoken": "^9.0.2",
+    "passport": "^0.7.0",
+    "passport-github2": "^0.1.12",
+    "passport-google-oauth20": "^2.0.0"
+  }
+}

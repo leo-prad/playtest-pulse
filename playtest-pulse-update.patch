@@ -1,0 +1,568 @@
+From d8d3ee95d6e741dca66d7755750a692689f0a5a9 Mon Sep 17 00:00:00 2001
+From: Leo <you@playtestpulse.dev>
+Date: Tue, 4 Aug 2026 22:26:26 -0500
+Subject: [PATCH] Events table columns + sort + column toggle, Connection tab,
+ events-over-time chart, auto-summarize
+
+- Events tab (renamed from Live stream): Time / Player / Server ID / Event / Data columns
+  with a header row, click-to-sort Time/Server/Event (asc/desc arrow), and a
+  Columns settings menu to show/hide columns (persisted in localStorage).
+- Connection panel moved to its own tab.
+- Overall: added an events-over-time SVG area chart (respects the date range).
+- Feedback summary auto-runs when a game opens or the page reloads; button still re-runs it.
+- db.js: stats.overview now returns a bucketed time series for the chart.
+---
+ db.js             |  34 +++++++++
+ public/app.js     | 178 ++++++++++++++++++++++++++++++++++++++++++----
+ public/index.html |  73 ++++++++++++++-----
+ public/styles.css |  84 ++++++++++++++++++++--
+ 4 files changed, 333 insertions(+), 36 deletions(-)
+
+diff --git a/db.js b/db.js
+index 8b39a3c..b710991 100644
+--- a/db.js
++++ b/db.js
+@@ -193,6 +193,35 @@ export function ingest(gameId, batch) {
+ 
+ // ---- dashboard reads ----
+ const RECENT_WINDOW = 500; // how many recent events the live stream can filter over
++const SERIES_BUCKETS = 40; // resolution of the Overall time-vs-events chart
++
++const tsOf = (e) => (typeof e.server_ts === "number" ? e.server_ts : Date.parse(e.server_ts));
++
++// Bucket events over time into a small series the frontend can chart. Returns
++// evenly spaced buckets between the first and last event so the x-axis is real
++// wall-clock time. A degenerate span (all events at once) collapses to a single
++// bucket rather than dividing by zero.
++function buildSeries(evs) {
++  if (evs.length === 0) return { buckets: [], bucketMs: 0, start: null, end: null };
++  let min = Infinity;
++  let max = -Infinity;
++  for (const e of evs) {
++    const t = tsOf(e);
++    if (t < min) min = t;
++    if (t > max) max = t;
++  }
++  const span = max - min;
++  if (span <= 0) return { buckets: [{ t: min, count: evs.length }], bucketMs: 1, start: min, end: min };
++
++  const bucketMs = Math.max(1, Math.ceil(span / SERIES_BUCKETS));
++  const n = Math.floor(span / bucketMs) + 1;
++  const buckets = Array.from({ length: n }, (_, i) => ({ t: min + i * bucketMs, count: 0 }));
++  for (const e of evs) {
++    const idx = Math.min(n - 1, Math.floor((tsOf(e) - min) / bucketMs));
++    buckets[idx].count++;
++  }
++  return { buckets, bucketMs, start: min, end: max };
++}
+ 
+ export const stats = {
+   overview(gameId, { from, to } = {}) {
+@@ -246,6 +275,10 @@ export const stats = {
+         };
+       });
+ 
++    // time-vs-events series for the Overall chart. Bucket every in-range event
++    // by server_ts into ~40 evenly spaced slots between the first and last event.
++    const series = buildSeries(evs);
++
+     return {
+       sessions: gameSessions.length,
+       events: evs.length,
+@@ -255,6 +288,7 @@ export const stats = {
+       servers,
+       topEvents,
+       recentEvents,
++      series,
+       range: { from: from || null, to: to || null },
+     };
+   },
+diff --git a/public/app.js b/public/app.js
+index 2e44b3e..31fed4c 100644
+--- a/public/app.js
++++ b/public/app.js
+@@ -1,5 +1,15 @@
+ // app.js — Playtest Pulse dashboard client. Vanilla JS, no build step.
+ 
++const DEFAULT_COLS = { time: true, player: true, server: true, data: true };
++
++function loadCols() {
++  try {
++    return { ...DEFAULT_COLS, ...JSON.parse(localStorage.getItem("pp_cols") || "{}") };
++  } catch {
++    return { ...DEFAULT_COLS };
++  }
++}
++
+ const state = {
+   token: localStorage.getItem("pp_token") || null,
+   mode: "login", // or "signup"
+@@ -10,6 +20,9 @@ const state = {
+   latest: null, // last stats payload, so filters re-render without a refetch
+   revealKey: false,
+   filters: { event: "", player: "", server: "", from: "", to: "" },
++  sort: { key: "time", dir: "desc" }, // Events table sort (time = newest first)
++  cols: loadCols(), // which Events columns are visible (persisted)
++  summarizedGameId: null, // game whose feedback we've already auto-crunched this session
+ };
+ 
+ const $ = (id) => document.getElementById(id);
+@@ -233,13 +246,13 @@ async function deleteGame(game) {
+ }
+ 
+ // ---------- tabs ----------
++const TAB_IDS = ["overall", "events", "connection"];
+ $("tabs").addEventListener("click", (e) => {
+   const btn = e.target.closest(".tab");
+   if (!btn) return;
+   state.tab = btn.dataset.tab;
+   for (const t of document.querySelectorAll(".tab")) t.classList.toggle("active", t === btn);
+-  $("tab-overall").classList.toggle("hidden", state.tab !== "overall");
+-  $("tab-live").classList.toggle("hidden", state.tab !== "live");
++  for (const id of TAB_IDS) $(`tab-${id}`).classList.toggle("hidden", state.tab !== id);
+ });
+ 
+ // ---------- filters ----------
+@@ -272,6 +285,54 @@ $("filter-clear").addEventListener("click", () => {
+   refreshStats();
+ });
+ 
++// ---------- events table: sorting ----------
++document.querySelectorAll(".et-head .sortable").forEach((h) =>
++  h.addEventListener("click", () => {
++    const key = h.dataset.sort;
++    if (state.sort.key === key) {
++      state.sort.dir = state.sort.dir === "asc" ? "desc" : "asc";
++    } else {
++      state.sort.key = key;
++      state.sort.dir = key === "time" ? "desc" : "asc";
++    }
++    renderStream();
++  })
++);
++
++function renderSortArrows() {
++  document.querySelectorAll(".et-head .sortable").forEach((h) => {
++    const active = h.dataset.sort === state.sort.key;
++    h.classList.toggle("active", active);
++    h.querySelector(".sort-arrow").textContent = active ? (state.sort.dir === "asc" ? "↑" : "↓") : "";
++  });
++}
++
++// ---------- events table: column show/hide ----------
++function applyCols() {
++  const table = $("events-table");
++  for (const col of Object.keys(DEFAULT_COLS)) {
++    table.classList.toggle(`hide-${col}`, !state.cols[col]);
++    const box = document.querySelector(`#cols-menu input[data-col="${col}"]`);
++    if (box) box.checked = state.cols[col];
++  }
++}
++$("cols-btn").addEventListener("click", (e) => {
++  e.stopPropagation();
++  const menu = $("cols-menu");
++  const open = menu.classList.toggle("hidden");
++  $("cols-btn").setAttribute("aria-expanded", String(!open));
++});
++document.addEventListener("click", (e) => {
++  if (!e.target.closest(".cols-wrap")) $("cols-menu").classList.add("hidden");
++});
++document.querySelectorAll('#cols-menu input[data-col]').forEach((box) =>
++  box.addEventListener("change", () => {
++    state.cols[box.dataset.col] = box.checked;
++    localStorage.setItem("pp_cols", JSON.stringify(state.cols));
++    applyCols();
++  })
++);
++
+ function syncFilterOptions(s) {
+   const pSel = $("filter-player");
+   const sSel = $("filter-server");
+@@ -328,6 +389,7 @@ async function refreshStats() {
+ 
+   syncFilterOptions(s);
+   renderStream();
++  renderChart(s.series);
+ }
+ 
+ function renderStream() {
+@@ -335,6 +397,9 @@ function renderStream() {
+   const stream = $("event-stream");
+   if (!s) return;
+ 
++  applyCols();
++  renderSortArrows();
++
+   const f = state.filters;
+   const rows = (s.recentEvents || []).filter((e) => {
+     if (f.event && !e.name.toLowerCase().includes(f.event)) return false;
+@@ -343,6 +408,21 @@ function renderStream() {
+     return true;
+   });
+ 
++  // sort by the active column
++  const dir = state.sort.dir === "asc" ? 1 : -1;
++  const keyFn = {
++    time: (e) => e.server_ts,
++    server: (e) => serverLabel(e.server_id).toLowerCase(),
++    event: (e) => e.name.toLowerCase(),
++  }[state.sort.key];
++  rows.sort((a, b) => {
++    const ka = keyFn(a);
++    const kb = keyFn(b);
++    if (ka < kb) return -1 * dir;
++    if (ka > kb) return 1 * dir;
++    return 0;
++  });
++
+   const total = (s.recentEvents || []).length;
+   $("filter-count").textContent =
+     rows.length === total ? `${total} events` : `${rows.length} of ${total}`;
+@@ -358,21 +438,86 @@ function renderStream() {
+   stream.innerHTML = rows
+     .map((e) => {
+       const t = new Date(e.server_ts).toLocaleTimeString();
+-      const props = e.properties ? " " + JSON.stringify(e.properties) : "";
++      const data = e.properties ? JSON.stringify(e.properties) : "—";
+       const color = playerColor(e.player_ref);
+-      return `<div class="stream-line">
+-        <span class="ts">${t}</span>
+-        <span class="badge player" style="color:${color};border-color:${color}44" title="Player ${escapeHtml(
++      return `<div class="et-row">
++        <span class="et-cell col-time">${t}</span>
++        <span class="et-cell col-player"><span class="badge player" style="color:${color};border-color:${color}44" title="Player ${escapeHtml(
+         e.player_ref || "anon"
+-      )}">${escapeHtml(playerLabel(e.player_ref))}</span>
+-        <span class="badge server" title="Server ${escapeHtml(e.server_id)}">${escapeHtml(serverLabel(e.server_id))}</span>
+-        <span class="nm">${escapeHtml(e.name)}</span>
+-        <span class="pr">${escapeHtml(props)}</span>
++      )}">${escapeHtml(playerLabel(e.player_ref))}</span></span>
++        <span class="et-cell col-server mono" title="${escapeHtml(e.server_id)}">${escapeHtml(serverLabel(e.server_id))}</span>
++        <span class="et-cell col-event">${escapeHtml(e.name)}</span>
++        <span class="et-cell col-data mono" title="${escapeHtml(data)}">${escapeHtml(data)}</span>
+       </div>`;
+     })
+     .join("");
+ }
+ 
++// ---------- overall: events-over-time chart ----------
++function renderChart(series) {
++  const host = $("events-chart");
++  const hint = $("chart-hint");
++  const buckets = (series && series.buckets) || [];
++  if (buckets.length === 0) {
++    host.innerHTML = `<div class="stream-empty">No events in this range yet.</div>`;
++    hint.textContent = "";
++    return;
++  }
++
++  const W = 640;
++  const H = 180;
++  const padL = 34;
++  const padR = 10;
++  const padT = 12;
++  const padB = 22;
++  const innerW = W - padL - padR;
++  const innerH = H - padT - padB;
++
++  const maxCount = Math.max(1, ...buckets.map((b) => b.count));
++  const n = buckets.length;
++  const x = (i) => padL + (n === 1 ? innerW / 2 : (i / (n - 1)) * innerW);
++  const y = (c) => padT + innerH - (c / maxCount) * innerH;
++
++  const linePts = buckets.map((b, i) => `${x(i)},${y(b.count)}`).join(" ");
++  const areaPts = `${padL},${padT + innerH} ${linePts} ${x(n - 1)},${padT + innerH}`;
++
++  // y gridlines at 0, mid, max
++  const yTicks = [0, Math.round(maxCount / 2), maxCount];
++  const grid = yTicks
++    .map(
++      (v) =>
++        `<line x1="${padL}" y1="${y(v)}" x2="${W - padR}" y2="${y(v)}" class="grid" />` +
++        `<text x="${padL - 6}" y="${y(v) + 3}" class="ytick">${v}</text>`
++    )
++    .join("");
++
++  const dots = buckets
++    .map((b, i) => `<circle cx="${x(i)}" cy="${y(b.count)}" r="2.2" class="dot"><title>${b.count} events</title></circle>`)
++    .join("");
++
++  const fmt = (t) => new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
++  const xStart = fmt(buckets[0].t);
++  const xEnd = fmt(buckets[n - 1].t);
++
++  host.innerHTML = `
++    <svg viewBox="0 0 ${W} ${H}" class="chart-svg" preserveAspectRatio="none" role="img" aria-label="Events over time">
++      <defs>
++        <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
++          <stop offset="0%" stop-color="var(--signal)" stop-opacity="0.35" />
++          <stop offset="100%" stop-color="var(--signal)" stop-opacity="0" />
++        </linearGradient>
++      </defs>
++      ${grid}
++      <polygon points="${areaPts}" fill="url(#areaGrad)" />
++      <polyline points="${linePts}" class="chart-line" />
++      ${dots}
++      <text x="${padL}" y="${H - 6}" class="xtick">${escapeHtml(xStart)}</text>
++      <text x="${W - padR}" y="${H - 6}" class="xtick end">${escapeHtml(xEnd)}</text>
++    </svg>`;
++  const totalEv = buckets.reduce((a, b) => a + b.count, 0);
++  hint.textContent = `${totalEv} events`;
++}
++
+ // ---------- connection panel ----------
+ function renderKeyPanel() {
+   const game = currentGame();
+@@ -415,15 +560,16 @@ $("rotate-key").addEventListener("click", async () => {
+ });
+ 
+ // ---------- feedback ----------
+-$("summarize-btn").addEventListener("click", async () => {
++async function runSummary() {
+   const game = currentGame();
+   if (!game) return;
+   const out = $("summary-out");
+   $("summarize-btn").disabled = true;
+   $("summarize-btn").textContent = "Analyzing…";
+-  out.innerHTML = `<p class="muted">Clustering feedback…</p>`;
++  out.innerHTML = `<p class="muted">Crunching feedback…</p>`;
+   try {
+     const r = await api(`/api/games/${game.id}/summarize`, { method: "POST" });
++    state.summarizedGameId = game.id;
+     renderSummary(r);
+   } catch (e) {
+     out.innerHTML = `<p class="error">${escapeHtml(e.message)}</p>`;
+@@ -431,7 +577,9 @@ $("summarize-btn").addEventListener("click", async () => {
+     $("summarize-btn").disabled = false;
+     $("summarize-btn").textContent = "Summarize feedback";
+   }
+-});
++}
++
++$("summarize-btn").addEventListener("click", runSummary);
+ 
+ function renderSummary(r) {
+   const out = $("summary-out");
+@@ -458,6 +606,10 @@ function startDashboard() {
+   if (state.pollTimer) clearInterval(state.pollTimer);
+   renderKeyPanel();
+   refreshStats();
++  // Auto-crunch feedback the moment a game opens (and on hot reload), so the
++  // summary is populated without waiting for a click. Button still re-runs it.
++  const game = currentGame();
++  if (game && state.summarizedGameId !== game.id) runSummary();
+   state.pollTimer = setInterval(refreshStats, 3000); // live feel without websockets
+ }
+ 
+diff --git a/public/index.html b/public/index.html
+index 0794d2a..adce575 100644
+--- a/public/index.html
++++ b/public/index.html
+@@ -65,7 +65,8 @@
+     <section id="dash-view" class="dash-view hidden">
+       <nav class="tabs" id="tabs">
+         <button class="tab active" data-tab="overall">Overall</button>
+-        <button class="tab" data-tab="live">Live stream</button>
++        <button class="tab" data-tab="events">Events</button>
++        <button class="tab" data-tab="connection">Connection</button>
+       </nav>
+ 
+       <!-- OVERALL -->
+@@ -75,20 +76,12 @@
+           <div class="tile stat"><span class="stat-num" id="stat-events">0</span><span class="stat-label">Events</span></div>
+           <div class="tile stat"><span class="stat-num" id="stat-feedback">0</span><span class="stat-label">Feedback</span></div>
+ 
+-          <div class="tile keypanel">
++          <div class="tile chartcard">
+             <div class="tile-head">
+-              <h3>Connection</h3>
+-              <button id="rotate-key" class="btn ghost tiny">Rotate key</button>
+-            </div>
+-            <label class="field-label">Endpoint</label>
+-            <code id="endpoint" class="codeline"></code>
+-            <label class="field-label">API key</label>
+-            <div class="keyrow">
+-              <code id="api-key" class="codeline mono blurred"></code>
+-              <button id="reveal-key" class="btn ghost tiny">Reveal</button>
+-              <button id="copy-key" class="btn ghost tiny">Copy</button>
++              <h3>Events over time</h3>
++              <span class="chart-hint" id="chart-hint"></span>
+             </div>
+-            <p class="hint">Paste both into <code>Telemetry.Configure</code> in your game.</p>
++            <div id="events-chart" class="chart"></div>
+           </div>
+ 
+           <div class="tile topevents">
+@@ -102,18 +95,29 @@
+               <button id="summarize-btn" class="btn primary tiny">Summarize feedback</button>
+             </div>
+             <div id="summary-out" class="summary-out">
+-              <p class="muted">Click summarize to cluster raw feedback into ranked themes.</p>
++              <p class="muted">Crunching feedback…</p>
+             </div>
+           </div>
+         </div>
+       </div>
+ 
+-      <!-- LIVE STREAM -->
+-      <div id="tab-live" class="tab-pane hidden">
++      <!-- EVENTS -->
++      <div id="tab-events" class="tab-pane hidden">
+         <div class="tile stream-full">
+           <div class="tile-head">
+-            <h3>Live event stream</h3>
+-            <span class="live-flag" id="live-flag">● live</span>
++            <h3>Events</h3>
++            <div class="head-actions">
++              <span class="live-flag" id="live-flag">● live</span>
++              <div class="cols-wrap">
++                <button id="cols-btn" class="btn ghost tiny" aria-haspopup="true" aria-expanded="false">⚙ Columns</button>
++                <div id="cols-menu" class="cols-menu hidden" role="menu">
++                  <label><input type="checkbox" data-col="time" checked /> Time</label>
++                  <label><input type="checkbox" data-col="player" checked /> Player</label>
++                  <label><input type="checkbox" data-col="server" checked /> Server ID</label>
++                  <label><input type="checkbox" data-col="data" checked /> Data</label>
++                </div>
++              </div>
++            </div>
+           </div>
+           <div class="filters">
+             <input id="filter-event" class="filter-input" placeholder="Search events…" />
+@@ -124,7 +128,38 @@
+             <button id="filter-clear" class="btn ghost tiny">Clear</button>
+             <span class="filter-count" id="filter-count"></span>
+           </div>
+-          <div id="event-stream" class="stream-body"></div>
++
++          <div class="events-table" id="events-table">
++            <div class="et-head">
++              <button class="et-cell col-time sortable" data-sort="time">Time <span class="sort-arrow"></span></button>
++              <span class="et-cell col-player">Player</span>
++              <button class="et-cell col-server sortable" data-sort="server">Server ID <span class="sort-arrow"></span></button>
++              <button class="et-cell col-event sortable" data-sort="event">Event <span class="sort-arrow"></span></button>
++              <span class="et-cell col-data">Data</span>
++            </div>
++            <div id="event-stream" class="et-body"></div>
++          </div>
++        </div>
++      </div>
++
++      <!-- CONNECTION -->
++      <div id="tab-connection" class="tab-pane hidden">
++        <div class="grid">
++          <div class="tile keypanel">
++            <div class="tile-head">
++              <h3>Connection</h3>
++              <button id="rotate-key" class="btn ghost tiny">Rotate key</button>
++            </div>
++            <label class="field-label">Endpoint</label>
++            <code id="endpoint" class="codeline"></code>
++            <label class="field-label">API key</label>
++            <div class="keyrow">
++              <code id="api-key" class="codeline mono blurred"></code>
++              <button id="reveal-key" class="btn ghost tiny">Reveal</button>
++              <button id="copy-key" class="btn ghost tiny">Copy</button>
++            </div>
++            <p class="hint">Paste both into <code>Telemetry.Configure</code> in your game.</p>
++          </div>
+         </div>
+       </div>
+     </section>
+diff --git a/public/styles.css b/public/styles.css
+index 853fc8d..f25fc9f 100644
+--- a/public/styles.css
++++ b/public/styles.css
+@@ -234,10 +234,86 @@ body {
+ .dd-icon:hover { background: var(--border); color: var(--text); }
+ .dd-icon.danger:hover { background: rgba(255,107,107,0.16); color: var(--high); }
+ 
+-/* Overall tab: feedback fills the last row for balance */
+-#tab-overall .feedback { grid-column: span 3; }
+-@media (max-width: 820px) { #tab-overall .feedback { grid-column: span 2; } }
+-@media (max-width: 540px) { #tab-overall .feedback { grid-column: span 1; } }
++/* Overall tab layout: full-width chart, then top-events + feedback */
++#tab-overall .chartcard { grid-column: span 3; }
++#tab-overall .topevents { grid-column: span 2; }
++#tab-overall .feedback { grid-column: span 1; }
++@media (max-width: 820px) {
++  #tab-overall .chartcard, #tab-overall .topevents, #tab-overall .feedback { grid-column: span 2; }
++}
++@media (max-width: 540px) {
++  #tab-overall .chartcard, #tab-overall .topevents, #tab-overall .feedback { grid-column: span 1; }
++}
++
++/* Connection tab: single comfortable-width card */
++#tab-connection .grid { grid-template-columns: minmax(0, 480px); }
++
++/* ---------- events-over-time chart ---------- */
++.chart-hint { font-family: var(--mono); font-size: 12px; color: var(--muted); }
++.chart { width: 100%; }
++.chart-svg { width: 100%; height: 180px; display: block; }
++.chart-line { fill: none; stroke: var(--signal); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
++.chart .dot { fill: var(--signal); }
++.chart .grid { stroke: var(--border); stroke-width: 1; }
++.chart .ytick { fill: var(--muted); font-family: var(--mono); font-size: 9px; text-anchor: end; }
++.chart .xtick { fill: var(--muted); font-family: var(--mono); font-size: 9px; }
++.chart .xtick.end { text-anchor: end; }
++
++/* ---------- events table (columns) ---------- */
++.head-actions { display: flex; align-items: center; gap: 12px; }
++.cols-wrap { position: relative; }
++.cols-menu {
++  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
++  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
++  padding: 8px; min-width: 150px; box-shadow: 0 12px 30px rgba(0,0,0,0.45);
++  display: flex; flex-direction: column; gap: 2px;
++}
++.cols-menu label {
++  display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text);
++  padding: 6px 8px; border-radius: 6px; cursor: pointer;
++}
++.cols-menu label:hover { background: var(--panel-2); }
++.cols-menu input { accent-color: var(--signal); }
++
++.events-table { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg); }
++.et-head, .et-row {
++  display: flex; align-items: center; gap: 12px;
++  padding: 8px 12px; font-family: var(--mono); font-size: 12.5px;
++}
++.et-head {
++  background: var(--panel-2); border-bottom: 1px solid var(--border);
++  color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-size: 11px;
++  position: sticky; top: 0; z-index: 1;
++}
++.et-body { max-height: 440px; overflow-y: auto; }
++.et-row { border-bottom: 1px solid rgba(35,42,52,0.5); line-height: 1.5; }
++.et-row:last-child { border-bottom: none; }
++.et-row:hover { background: var(--panel); }
++
++/* column widths — shared by header + rows */
++.et-cell { flex-shrink: 0; }
++.col-time { width: 92px; color: var(--signal); }
++.col-player { width: 84px; }
++.col-server { width: 150px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.col-event { width: 170px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.col-data { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.et-cell.mono { font-family: var(--mono); }
++
++/* sortable headers */
++button.et-cell.sortable {
++  background: transparent; border: none; color: inherit; cursor: pointer;
++  font: inherit; text-transform: inherit; letter-spacing: inherit;
++  display: flex; align-items: center; gap: 4px; padding: 0;
++}
++button.et-cell.sortable:hover { color: var(--text); }
++button.et-cell.sortable.active { color: var(--signal); }
++.sort-arrow { font-size: 11px; }
++
++/* column hide toggles */
++.events-table.hide-time .col-time,
++.events-table.hide-player .col-player,
++.events-table.hide-server .col-server,
++.events-table.hide-data .col-data { display: none; }
+ 
+ /* ---------- tabs ---------- */
+ .tabs { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+-- 
+2.34.1
+
