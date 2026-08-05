@@ -76,64 +76,96 @@ local function _bufferFor(player: Player): BufferData
 	return buffer
 end
 
--- POST one player's pending batch. Returns the server-assigned session id so
--- subsequent batches attach to the same session.
-local function _flushPlayer(player: Player, buffer: BufferData)
-	local hasEvents = #buffer.events > 0
-	local hasFeedback = #buffer.feedback > 0
-	if not (hasEvents or hasFeedback or buffer.ended) then
-		return
-	end
+local function _serverId(): string
+	return (game.JobId ~= "" and game.JobId) or "studio"
+end
 
-	local payload = {
+-- Build one player's pending batch, or nil if nothing to send.
+local function _batchFor(player: Player, buffer: BufferData): { [string]: any }?
+	if #buffer.events == 0 and #buffer.feedback == 0 and not buffer.ended then
+		return nil
+	end
+	return {
 		session_id = buffer.sessionId,
 		player_id = player.UserId, -- hashed + anonymized server-side, never stored raw
-		server_id = (game.JobId ~= "" and game.JobId) or "studio", -- which live server; "studio" in-editor
+		server_id = _serverId(), -- which live server; "studio" in-editor
 		started_at = buffer.startedAt,
 		events = buffer.events,
 		feedback = buffer.feedback,
 		ended = buffer.ended,
 	}
-
-	local ok, response = pcall(function()
-		return HttpService:RequestAsync({
-			Url = config.endpoint .. "/ingest",
-			Method = "POST",
-			Headers = {
-				["Content-Type"] = "application/json",
-				["x-api-key"] = config.apiKey,
-			},
-			Body = HttpService:JSONEncode(payload),
-		})
-	end)
-
-	if not ok then
-		warn("[Telemetry] flush failed (network):", response)
-		return
-	end
-
-	if not response.Success then
-		warn("[Telemetry] flush rejected:", response.StatusCode, response.Body)
-		return
-	end
-
-	-- Only clear the buffer once the server confirms receipt — no data loss on
-	-- a transient failure, we just retry the same events next tick.
-	local decoded = HttpService:JSONDecode(response.Body)
-	if decoded.session_id then
-		buffer.sessionId = decoded.session_id
-	end
-	buffer.events = {}
-	buffer.feedback = {}
 end
 
+-- Combined per-server flush: gather every player's pending batch into ONE
+-- HTTP request. This keeps request-count constant regardless of player count
+-- (one per flush interval instead of N), well under Roblox's ~500 req/min
+-- HttpService limit. Buffers are only cleared once the server confirms each
+-- batch — a network blip retries the same events next tick.
 local function _flushAll()
+	local orderedPlayers: { Player } = {}
+	local payloads: { { [string]: any } } = {}
 	for player, buffer in buffers do
-		_flushPlayer(player, buffer)
+		local payload = _batchFor(player, buffer)
+		if payload then
+			table.insert(orderedPlayers, player)
+			table.insert(payloads, payload)
+		end
+	end
+
+	if #payloads > 0 then
+		local ok, response = pcall(function()
+			return HttpService:RequestAsync({
+				Url = config.endpoint .. "/ingest-multi",
+				Method = "POST",
+				Headers = {
+					["Content-Type"] = "application/json",
+					["x-api-key"] = config.apiKey,
+				},
+				Body = HttpService:JSONEncode({ batches = payloads }),
+			})
+		end)
+
+		if not ok then
+			warn("[Telemetry] flush failed (network):", response)
+		elseif not response.Success then
+			warn("[Telemetry] flush rejected:", response.StatusCode, response.Body)
+		else
+			-- Server returns per-batch results in submission order. Clear each
+			-- player's buffer only for batches the server actually accepted.
+			local decoded = HttpService:JSONDecode(response.Body)
+			local results = decoded.results or {}
+			for i, player in orderedPlayers do
+				local buffer = buffers[player]
+				if buffer then
+					local r = results[i]
+					if r and r.ok then
+						if r.session_id then
+							buffer.sessionId = r.session_id
+						end
+						buffer.events = {}
+						buffer.feedback = {}
+					else
+						warn("[Telemetry] batch rejected for player", player.UserId, ":", r and r.error)
+					end
+				end
+			end
+		end
+	end
+
+	-- Reap players that ended this flush, whether we sent them or not.
+	for player, buffer in buffers do
 		if buffer.ended then
 			buffers[player] = nil
 		end
 	end
+end
+
+-- Ends a single session and flushes immediately so the leaving player's last
+-- events aren't stranded. Reuses the multi-flush path so the request count
+-- rule (1 per server tick) still holds.
+local function _flushPlayerNow(player: Player, buffer: BufferData)
+	buffer.ended = true
+	_flushAll()
 end
 
 ------------------// FUNCTIONS \\--------------------
@@ -185,9 +217,7 @@ function Telemetry.EndSession(player: Player)
 	if not buffer then
 		return
 	end
-	buffer.ended = true
-	_flushPlayer(player, buffer)
-	buffers[player] = nil
+	_flushPlayerNow(player, buffer)
 end
 
 ------------------// LIFECYCLE \\--------------------

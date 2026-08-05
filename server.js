@@ -124,7 +124,9 @@ app.use(session({
   cookie: { secure: process.env.NODE_ENV === "production", sameSite: "lax", httpOnly: true, maxAge: 10 * 60 * 1000 },
 }));
 app.use(passport.initialize());
-app.use(express.json({ limit: "256kb" }));
+// 512KB gives ~30 players' 5-second batches on one /ingest-multi request
+// with room to spare; well under Roblox HttpService's ~1MB cap.
+app.use(express.json({ limit: "512kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -288,6 +290,30 @@ app.post("/ingest", ingestLimiter, checkApiKey, (req, res) => {
   } catch (err) {
     res.status(500).json({ error: "Could not store batch: " + err.message });
   }
+});
+
+// Combined per-server flush. One HTTP request carries every player's pending
+// batch, so a 30-player server sends 1 request per flush instead of 30 —
+// keeps us far below Roblox's HttpService rate limit. Per-batch try/catch
+// means one malformed batch can't poison the others; the client gets a
+// per-batch result array in the same order it sent.
+app.post("/ingest-multi", ingestLimiter, checkApiKey, (req, res) => {
+  const batches = req.body?.batches;
+  if (!Array.isArray(batches) || batches.length === 0)
+    return res.status(400).json({ error: "Body must be { batches: [...] } with at least one batch." });
+  if (batches.length > 200)
+    return res.status(400).json({ error: "Too many batches in one request (max 200)." });
+
+  const results = batches.map((batch) => {
+    if (!batch || (!Array.isArray(batch.events) && !Array.isArray(batch.feedback)))
+      return { ok: false, error: "Batch needs an events or feedback array." };
+    try {
+      return { ok: true, ...ingest(req.game.id, batch) };
+    } catch (err) {
+      return { ok: false, error: "Could not store batch: " + err.message };
+    }
+  });
+  res.json({ ok: true, results });
 });
 
 // health check (handy once deployed)
