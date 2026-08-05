@@ -140,6 +140,11 @@ export function ingest(gameId, batch, opts = {}) {
   // SDK sends "studio" — either way we tag the session with where it came from.
   const serverId = String(batch.server_id || "studio").slice(0, 64);
 
+  // Optional human-readable region (e.g. "US East"). Roblox doesn't expose the
+  // datacenter region to scripts, so the SDK supplies it (or leaves it null);
+  // it's separate from server_id, which is the instance JobId.
+  const region = batch.region ? String(batch.region).slice(0, 40) : null;
+
   const sessionExists = data.sessions.some((s) => s.id === sid && s.game_id === gameId);
   if (!sessionExists) {
     newSessions.push({
@@ -147,6 +152,7 @@ export function ingest(gameId, batch, opts = {}) {
       game_id: gameId,
       player_ref: playerRef,
       server_id: serverId,
+      region,
       started_at: batch.started_at || serverTs,
       ended_at: null,
     });
@@ -171,6 +177,10 @@ export function ingest(gameId, batch, opts = {}) {
       session_id: sid,
       player_ref: playerRef,
       content: String(f.content).slice(0, 2000),
+      // created_at stays server-authoritative; client_ts is the moment the
+      // player CLAIMS they wrote it (same dual-timestamp idea as events), used
+      // only to place feedback on the session replay timeline.
+      client_ts: typeof f.client_ts === "number" ? f.client_ts : null,
       created_at: serverTs,
     });
   }
@@ -310,6 +320,149 @@ export const stats = {
       topEvents,
       recentEvents,
       series,
+      range: { from: from || null, to: to || null },
+    };
+  },
+  // Per-session detail for the Sessions tab. For each session we return its
+  // ordered event sequence, any linked feedback, and derived "struggle" signals
+  // (deaths, rage bursts, rage-quits) plus a headline score used to rank the
+  // list. Also returns a drop-off aggregate (the last event of each session —
+  // "where did players stop?") and top-line health numbers. Honors the same
+  // from/to date range as overview(), so chart drag-zoom scopes this too.
+  sessions(gameId, { from, to } = {}) {
+    const rangeStart = from ? Date.parse(`${from}T00:00:00.000Z`) : null;
+    const rangeEnd = to ? Date.parse(`${to}T23:59:59.999Z`) : null;
+    const inRange = (t) => (!rangeStart || t >= rangeStart) && (!rangeEnd || t <= rangeEnd);
+
+    // Effective time of an event/feedback row: prefer the client's claimed
+    // moment (client_ts) so a session's own events spread out on the replay
+    // timeline, and fall back to the server-observed time.
+    const timeOf = (row) => {
+      if (typeof row.client_ts === "number") return row.client_ts;
+      if (typeof row.server_ts === "number") return row.server_ts;
+      if (typeof row.created_at === "number") return row.created_at;
+      return Date.parse(row.server_ts || row.created_at);
+    };
+
+    const evBySession = new Map();
+    for (const e of data.events) {
+      if (e.game_id !== gameId) continue;
+      if (!evBySession.has(e.session_id)) evBySession.set(e.session_id, []);
+      evBySession.get(e.session_id).push(e);
+    }
+    const fbBySession = new Map();
+    for (const f of data.feedback) {
+      if (f.game_id !== gameId) continue;
+      if (!fbBySession.has(f.session_id)) fbBySession.set(f.session_id, []);
+      fbBySession.get(f.session_id).push(f);
+    }
+
+    const RAGE_WINDOW_MS = 2 * 60 * 1000;
+    const RAGE_DEATHS = 3;
+
+    const out = [];
+    for (const s of data.sessions) {
+      if (s.game_id !== gameId) continue;
+
+      const events = (evBySession.get(s.id) || [])
+        .map((e) => ({ name: e.name, properties: e.properties ?? null, ts: timeOf(e) }))
+        .sort((a, b) => a.ts - b.ts);
+
+      const firstTs = events.length ? events[0].ts : s.started_at;
+      if (!inRange(firstTs)) continue;
+
+      const feedback = (fbBySession.get(s.id) || [])
+        .map((f) => ({ content: f.content, ts: timeOf(f) }))
+        .sort((a, b) => a.ts - b.ts);
+
+      const deaths = events.filter((e) => e.name === "player_died").length;
+      const completed = events.some((e) => e.name === "level_completed");
+      const reachedBoss = events.some((e) => e.name === "boss_encountered");
+      const play = events.filter((e) => e.name !== "session_started");
+      const lastEvent = play.length
+        ? play[play.length - 1].name
+        : events.length
+        ? events[events.length - 1].name
+        : null;
+      const lastTs = events.length ? events[events.length - 1].ts : s.ended_at || s.started_at;
+      const duration = Math.max(0, lastTs - firstTs);
+
+      // biggest burst of deaths inside a 2-minute sliding window
+      const deathTimes = events.filter((e) => e.name === "player_died").map((e) => e.ts);
+      let rage = 0;
+      for (let i = 0; i < deathTimes.length; i++) {
+        let j = i;
+        while (j < deathTimes.length && deathTimes[j] - deathTimes[i] <= RAGE_WINDOW_MS) j++;
+        rage = Math.max(rage, j - i);
+      }
+      const rageBurst = rage >= RAGE_DEATHS;
+      const rageQuit = !!s.ended_at && !completed && lastEvent === "player_died";
+
+      const flags = [];
+      let score = deaths;
+      if (rageBurst) {
+        score += 4;
+        flags.push(`${rage} deaths in under 2 min`);
+      } else if (deaths > 0) {
+        flags.push(`${deaths} death${deaths === 1 ? "" : "s"}`);
+      }
+      if (rageQuit) {
+        score += 3;
+        flags.push("Quit right after dying");
+      }
+      if (!completed && reachedBoss) {
+        score += 1;
+        if (!rageQuit) flags.push("Reached boss, didn’t finish");
+      }
+      if (completed && score === 0) flags.push("Clean clear");
+
+      const outcome = completed ? "completed" : rageQuit ? "ragequit" : s.ended_at ? "left" : "active";
+
+      out.push({
+        id: s.id,
+        player_ref: s.player_ref,
+        server_id: s.server_id || "studio",
+        region: s.region || null,
+        started_at: firstTs,
+        ended_at: s.ended_at,
+        duration,
+        events,
+        feedback,
+        deaths,
+        completed,
+        lastEvent,
+        outcome,
+        struggling: score >= 4,
+        score,
+        flags,
+      });
+    }
+
+    // rank by struggle, then most-recent first
+    out.sort((a, b) => b.score - a.score || b.started_at - a.started_at);
+
+    // drop-off: how many sessions ended on each event
+    const dropMap = new Map();
+    for (const sess of out) {
+      const key = sess.lastEvent || "—";
+      dropMap.set(key, (dropMap.get(key) || 0) + 1);
+    }
+    const dropoff = [...dropMap.entries()]
+      .map(([name, n]) => ({ name, n }))
+      .sort((a, b) => b.n - a.n);
+
+    const struggling = out.filter((s) => s.struggling).length;
+    const completedCount = out.filter((s) => s.completed).length;
+
+    return {
+      sessions: out,
+      dropoff,
+      health: {
+        total: out.length,
+        struggling,
+        completed: completedCount,
+        completionRate: out.length ? Math.round((completedCount / out.length) * 100) : 0,
+      },
       range: { from: from || null, to: to || null },
     };
   },

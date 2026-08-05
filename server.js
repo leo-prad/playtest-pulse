@@ -21,14 +21,41 @@ import { summarizeFeedback } from "./summarize.js";
 
 const DEMO_EMAIL = "demo@playtestpulse.dev";
 const DEMO_PASSWORD = "demopassword123";
-const DEMO_FEEDBACK = [
-  "The boss on level 3 is too hard; I died eight times.",
-  "Movement felt laggy in the cave when enemies spawned.",
-  "The dungeon lighting looks great, but I need a tutorial for blocking.",
-  "The loot system is addictive, though inventory is clunky mid-fight.",
-  "More checkpoints would make failed runs less frustrating.",
+
+// Scenario templates give the demo realistic playtests instead of random noise:
+// boss rage-quits, clean clears, mid-run deaths, early bail-outs. Each is an
+// ordered event list; `ended` marks a session the player left. Feedback, when
+// present, is written at the end of the run so it lands next to the moment it
+// describes on the session replay timeline.
+const DEMO_SCENARIOS = [
+  {
+    events: ["session_started", "level_started", "boss_encountered", "player_died", "player_died", "player_died", "player_died"],
+    ended: true,
+    feedback: "The boss on level 3 is too hard; I died eight times.",
+  },
+  {
+    events: ["session_started", "level_started", "item_picked_up", "boss_encountered", "level_completed", "shop_opened"],
+    ended: true,
+  },
+  {
+    events: ["session_started", "level_started", "player_died", "item_picked_up", "player_died", "boss_encountered", "level_completed"],
+    ended: true,
+    feedback: "More checkpoints would make failed runs less frustrating.",
+  },
+  {
+    events: ["session_started", "level_started", "player_died", "player_died"],
+    ended: true,
+    feedback: "Movement felt laggy in the cave when enemies spawned.",
+  },
+  {
+    events: ["session_started", "level_started", "item_picked_up", "shop_opened", "item_picked_up", "level_completed"],
+    ended: true,
+  },
+  {
+    events: ["session_started", "level_started", "item_picked_up", "level_completed", "level_started", "boss_encountered", "level_completed"],
+    ended: true,
+  },
 ];
-const DEMO_EVENT_NAMES = ["level_started", "player_died", "item_picked_up", "boss_encountered", "level_completed", "shop_opened"];
 
 async function ensureDemoWorkspace() {
   let demoUser = users.byEmail(DEMO_EMAIL);
@@ -39,32 +66,46 @@ async function ensureDemoWorkspace() {
   if (stats.overview(demoGame.id).events > 0) return;
 
   const servers = ["srv-us-east-01", "srv-eu-west-02", "srv-ap-southeast-03"];
-  // Spread the 15 demo sessions across the last ~4 weeks so the Overall chart
-  // shows a real dated timeline (with quiet days) instead of one instant. Each
-  // entry is "days ago"; clustering several sessions on some days and leaving
-  // others empty gives the line natural peaks and valleys.
+  const REGIONS = { "srv-us-east-01": "US East", "srv-eu-west-02": "EU West", "srv-ap-southeast-03": "Asia Pacific" };
+  // Spread sessions across the last ~4 weeks so the Overall chart shows a real
+  // dated timeline (with quiet days). `daysAgo` places each session's day;
+  // `plan` picks its scenario, seeding several rage-quits and clean clears so
+  // the Sessions tab has struggle signals and drop-off variety to show.
   const DAY_MS = 24 * 60 * 60 * 1000;
+  const MIN = 60 * 1000;
   const daysAgo = [27, 27, 25, 22, 22, 20, 18, 15, 15, 13, 10, 7, 7, 4, 1];
+  const plan = [0, 3, 1, 2, 4, 0, 5, 1, 3, 2, 4, 0, 5, 2, 1];
   const baseNow = Date.now();
-  for (let session = 0; session < 15; session++) {
-    const events = [{ name: "session_started", properties: { place_version: 42 } }];
-    for (let event = 0; event < 6 + (session % 4); event++) {
-      const name = DEMO_EVENT_NAMES[(session + event) % DEMO_EVENT_NAMES.length];
-      events.push({ name, properties: { level: 1 + ((session + event) % 5) } });
-    }
-    // backdate the whole batch to its assigned day (spread within the day a bit)
-    const serverTs = baseNow - daysAgo[session] * DAY_MS + (session % 6) * 90 * 60 * 1000;
+  for (let session = 0; session < daysAgo.length; session++) {
+    const scenario = DEMO_SCENARIOS[plan[session]];
+    // backdate the batch to its assigned day; server_ts (used by the Overall
+    // day chart) is this instant for the whole batch.
+    const sessionStart = baseNow - daysAgo[session] * DAY_MS + (session % 6) * 90 * MIN;
+    // give each event its own client_ts a little later than the last, so the
+    // replay timeline spreads out and rage bursts are measurable.
+    let cursor = sessionStart;
+    const events = scenario.events.map((name, i) => {
+      if (i > 0) cursor += 20 * 1000 + ((session + i) % 4) * 15 * 1000; // 20–65s apart
+      return {
+        name,
+        client_ts: cursor,
+        properties: name === "session_started" ? { place_version: 42 } : { level: 1 + ((session + i) % 4) },
+      };
+    });
+    const feedback = scenario.feedback ? [{ content: scenario.feedback, client_ts: cursor }] : [];
+    const serverId = servers[session % servers.length];
     ingest(
       demoGame.id,
       {
         session_id: `demo-session-${session + 1}`,
         player_id: 100000 + session,
-        server_id: servers[session % servers.length],
+        server_id: serverId,
+        region: REGIONS[serverId],
         events,
-        feedback: session % 2 === 0 ? [{ content: DEMO_FEEDBACK[session % DEMO_FEEDBACK.length] }] : [],
-        ended: true,
+        feedback,
+        ended: scenario.ended,
       },
-      { serverTs }
+      { serverTs: sessionStart }
     );
   }
 }
@@ -197,6 +238,18 @@ app.get("/api/games/:id/stats", requireAuth, (req, res) => {
   if (from && to && from > to)
     return res.status(400).json({ error: "Start date must be before end date." });
   res.json(stats.overview(game.id, { from, to }));
+});
+
+app.get("/api/games/:id/sessions", requireAuth, (req, res) => {
+  const game = games.byIdForUser(req.params.id, req.user.id);
+  if (!game) return res.status(404).json({ error: "Game not found." });
+  const { from, to } = req.query;
+  const validDate = (value) => !value || /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (!validDate(from) || !validDate(to))
+    return res.status(400).json({ error: "Dates must use YYYY-MM-DD." });
+  if (from && to && from > to)
+    return res.status(400).json({ error: "Start date must be before end date." });
+  res.json(stats.sessions(game.id, { from, to }));
 });
 
 app.post("/api/games/:id/summarize", requireAuth, async (req, res) => {

@@ -23,6 +23,11 @@ const state = {
   sort: { key: "time", dir: "desc" }, // Events table sort (time = newest first)
   cols: loadCols(), // which Events columns are visible (persisted)
   summarizedGameId: null, // game whose feedback we've already auto-crunched this session
+  sessions: null, // last /sessions payload (Sessions tab)
+  selectedSession: null, // id of the session opened in the replay panel
+  sessFilter: "all", // Sessions list filter: all | struggling | completed | feedback
+  replaySort: "asc", // replay event list order: "asc" (chronological) | "desc"
+  _sessSig: null, // change signature so polling doesn't needlessly redraw the list
 };
 
 const $ = (id) => document.getElementById(id);
@@ -205,6 +210,9 @@ document.addEventListener("click", (e) => {
 function selectGame(id) {
   state.currentGameId = id;
   state.filters = { event: "", player: "", server: "", from: "", to: "" };
+  state.sessions = null;
+  state.selectedSession = null;
+  state._sessSig = null;
   renderDropdown();
   startDashboard();
 }
@@ -246,13 +254,14 @@ async function deleteGame(game) {
 }
 
 // ---------- tabs ----------
-const TAB_IDS = ["overall", "events", "connection"];
+const TAB_IDS = ["overall", "sessions", "events", "connection"];
 $("tabs").addEventListener("click", (e) => {
   const btn = e.target.closest(".tab");
   if (!btn) return;
   state.tab = btn.dataset.tab;
   for (const t of document.querySelectorAll(".tab")) t.classList.toggle("active", t === btn);
   for (const id of TAB_IDS) $(`tab-${id}`).classList.toggle("hidden", state.tab !== id);
+  if (state.tab === "sessions") loadSessions(); // make the first open snappy
 });
 
 // ---------- filters ----------
@@ -285,14 +294,26 @@ $("filter-clear").addEventListener("click", () => {
   refreshStats();
 });
 
-// chart drag-zoom sets the date range; this clears just the dates back to full history
-$("chart-reset").addEventListener("click", () => {
+// chart drag-zoom sets the date range; this clears just the dates back to full
+// history. Both the Overall and Events charts share the same range + button.
+function resetChartZoom() {
   state.filters.from = "";
   state.filters.to = "";
   $("filter-from").value = "";
   $("filter-to").value = "";
   refreshStats();
-});
+}
+$("chart-reset").addEventListener("click", resetChartZoom);
+$("chart-reset-2").addEventListener("click", resetChartZoom);
+
+// ---------- sessions: list filter (All / Struggling) ----------
+document.querySelectorAll(".sess-filter").forEach((btn) =>
+  btn.addEventListener("click", () => {
+    state.sessFilter = btn.dataset.sfilter;
+    document.querySelectorAll(".sess-filter").forEach((b) => b.classList.toggle("active", b === btn));
+    if (state.sessions) renderSessionList(state.sessions.sessions);
+  })
+);
 
 // ---------- events table: sorting ----------
 document.querySelectorAll(".et-head .sortable").forEach((h) =>
@@ -398,7 +419,9 @@ async function refreshStats() {
 
   syncFilterOptions(s);
   renderStream();
-  renderChart(s.series);
+  renderChart(s.series); // Overall tab
+  renderChart(s.series, { hostId: "events-chart-2", hintId: "chart-hint-2", resetId: "chart-reset-2", gradId: "areaGrad2" }); // Events tab
+  loadSessions();
 }
 
 function renderStream() {
@@ -476,12 +499,22 @@ function fmtChart(t, unit, long) {
   return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-function renderChart(series) {
-  const host = $("events-chart");
-  const hint = $("chart-hint");
-  const resetBtn = $("chart-reset");
+function renderChart(series, opts = {}) {
+  const host = $(opts.hostId || "events-chart");
+  if (!host) return;
+  const hint = $(opts.hintId || "chart-hint");
+  const resetBtn = $(opts.resetId || "chart-reset");
+  const gradId = opts.gradId || "areaGrad";
   const buckets = (series && series.buckets) || [];
   const zoomed = !!(state.filters.from || state.filters.to);
+
+  // The dashboard polls every 3s. Rebuilding the SVG (and rebinding listeners)
+  // on every tick is what made scrolling stutter, so skip the redraw when the
+  // data and zoom state are unchanged.
+  const sig = JSON.stringify([series && series.unit, buckets.map((b) => [b.t, b.count]), zoomed]);
+  if (host._chartSig === sig) return;
+  host._chartSig = sig;
+
   resetBtn.classList.toggle("hidden", !zoomed);
 
   // tear down the previous chart's window-level drag listener before redrawing
@@ -533,13 +566,13 @@ function renderChart(series) {
   host.innerHTML = `
     <svg viewBox="0 0 ${W} ${H}" class="chart-svg" preserveAspectRatio="none" role="img" aria-label="Events over time">
       <defs>
-        <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+        <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stop-color="var(--signal)" stop-opacity="0.35" />
           <stop offset="100%" stop-color="var(--signal)" stop-opacity="0" />
         </linearGradient>
       </defs>
       ${grid}
-      <polygon points="${areaPts}" fill="url(#areaGrad)" />
+      <polygon points="${areaPts}" fill="url(#${gradId})" />
       <polyline points="${linePts}" class="chart-line" />
       ${dots}
       <rect class="chart-sel hidden" y="${padT}" height="${innerH}" />
@@ -629,6 +662,311 @@ function renderChart(series) {
   }
   window.addEventListener("mouseup", onUp);
   host._chartCleanup = () => window.removeEventListener("mouseup", onUp);
+}
+
+// ---------- sessions: replay, struggle detection, drop-off ----------
+const EVENT_KIND = {
+  player_died: "bad",
+  level_completed: "good",
+  boss_encountered: "warn",
+  session_started: "start",
+  shop_opened: "info",
+  item_picked_up: "info",
+};
+const eventKind = (name) => EVENT_KIND[name] || "neutral";
+
+const OUTCOME = {
+  completed: { label: "Completed", cls: "good" },
+  ragequit: { label: "Rage-quit", cls: "bad" },
+  left: { label: "Left", cls: "neutral" },
+  active: { label: "Active", cls: "warn" },
+};
+
+const fmtDayTime = (t) =>
+  new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const fmtClock = (t) => new Date(t).toLocaleTimeString();
+function fmtDuration(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return r ? `${m}m ${r}s` : `${m}m`;
+}
+
+async function loadSessions() {
+  const game = currentGame();
+  if (!game) return;
+  try {
+    const params = new URLSearchParams();
+    if (state.filters.from) params.set("from", state.filters.from);
+    if (state.filters.to) params.set("to", state.filters.to);
+    const suffix = params.size ? `?${params}` : "";
+    state.sessions = await api(`/api/games/${game.id}/sessions${suffix}`);
+  } catch {
+    return; // transient; next tick retries
+  }
+  renderSessions();
+}
+
+function renderSessions() {
+  const data = state.sessions;
+  if (!data) return;
+
+  // The dashboard polls every 3s. Re-rendering the list on every tick would
+  // reset its scroll position and drop hover state, so only redraw when the
+  // data actually changed (a live playtest firing events, or a date zoom).
+  const sig = JSON.stringify([
+    data.health,
+    data.dropoff,
+    data.sessions.map((s) => [s.id, s.score, s.events.length, s.feedback.length, s.outcome]),
+  ]);
+  if (sig === state._sessSig) return;
+  state._sessSig = sig;
+
+  renderDropoff(data.dropoff);
+  renderHealth(data.health);
+  renderSessionList(data.sessions);
+
+  const sel = data.sessions.find((s) => s.id === state.selectedSession);
+  if (state.selectedSession && !sel) {
+    // the open session fell out of the current range (e.g. after a zoom)
+    state.selectedSession = null;
+    $("session-detail").innerHTML = `<div class="stream-empty">Select a session on the left to replay it.</div>`;
+  } else if (sel) {
+    renderSessionDetail(sel); // keep an open replay in sync with fresh data
+  }
+}
+
+function renderDropoff(dropoff) {
+  const host = $("dropoff-bars");
+  if (!dropoff || dropoff.length === 0) {
+    host.innerHTML = `<li class="stream-empty">No sessions in this range yet.</li>`;
+    return;
+  }
+  const max = Math.max(1, ...dropoff.map((d) => d.n));
+  host.innerHTML = dropoff
+    .map(
+      (d) => `<li>
+        <span class="ev-name k-${eventKind(d.name)}">${escapeHtml(d.name)}</span>
+        <span class="track"><span class="fill" style="width:${(d.n / max) * 100}%"></span></span>
+        <span class="ev-count">${d.n}</span>
+      </li>`
+    )
+    .join("");
+}
+
+function renderHealth(h) {
+  $("sess-health").innerHTML = `
+    <div class="hstat"><span class="hnum">${h.total}</span><span class="hlbl">Sessions</span></div>
+    <div class="hstat"><span class="hnum ${h.struggling ? "bad" : ""}">${h.struggling}</span><span class="hlbl">Struggling</span></div>
+    <div class="hstat"><span class="hnum ${h.completionRate >= 50 ? "good" : "warn"}">${h.completionRate}%</span><span class="hlbl">Completed</span></div>`;
+}
+
+function renderSessionList(sessions) {
+  const host = $("session-list");
+  const match = {
+    all: () => true,
+    struggling: (s) => s.struggling,
+    completed: (s) => s.completed,
+    feedback: (s) => s.feedback.length > 0,
+  }[state.sessFilter] || (() => true);
+  const filtered = sessions.filter(match);
+  $("sess-count").textContent =
+    filtered.length === sessions.length ? `${sessions.length}` : `${filtered.length} of ${sessions.length}`;
+
+  if (filtered.length === 0) {
+    const empty =
+      sessions.length === 0
+        ? "No sessions in this range yet."
+        : {
+            struggling: "No struggling sessions — nice.",
+            completed: "No completed sessions in this range.",
+            feedback: "No sessions with feedback in this range.",
+          }[state.sessFilter] || "No sessions match.";
+    host.innerHTML = `<div class="stream-empty">${empty}</div>`;
+    return;
+  }
+
+  host.innerHTML = filtered
+    .map((s) => {
+      const color = playerColor(s.player_ref);
+      const oc = OUTCOME[s.outcome] || OUTCOME.left;
+      const active = s.id === state.selectedSession ? " active" : "";
+      const flagText = s.flags.length ? s.flags[0] : s.completed ? "Completed" : "No issues";
+      return `<button class="sess-row${active}${s.struggling ? " is-struggling" : ""}" data-id="${escapeHtml(s.id)}" type="button">
+        <span class="sess-row-head">
+          <span class="badge player" style="color:${color};border-color:${color}44">${escapeHtml(playerLabel(s.player_ref))}</span>
+          <span class="outcome-pill ${oc.cls}">${oc.label}</span>
+        </span>
+        <span class="sess-row-flag">${escapeHtml(flagText)}</span>
+        <span class="sess-row-meta">${escapeHtml(fmtDayTime(s.started_at))} · ${escapeHtml(fmtDuration(s.duration))} · ${s.events.length} events${
+        s.feedback.length ? ' · <span class="fb-dot">💬</span>' : ""
+      }</span>
+      </button>`;
+    })
+    .join("");
+
+  host.querySelectorAll(".sess-row").forEach((row) =>
+    row.addEventListener("click", () => selectSession(row.dataset.id))
+  );
+}
+
+function selectSession(id) {
+  state.selectedSession = id;
+  document.querySelectorAll(".sess-row").forEach((r) => r.classList.toggle("active", r.dataset.id === id));
+  const s = (state.sessions?.sessions || []).find((x) => x.id === id);
+  renderSessionDetail(s);
+}
+
+function renderSessionDetail(s) {
+  const host = $("session-detail");
+  if (!s) {
+    host.innerHTML = `<div class="stream-empty">Select a session on the left to replay it.</div>`;
+    return;
+  }
+  const color = playerColor(s.player_ref);
+  const oc = OUTCOME[s.outcome] || OUTCOME.left;
+
+  const evs = s.events;
+  const first = evs.length ? evs[0].ts : s.started_at;
+  const last = evs.length ? evs[evs.length - 1].ts : s.started_at;
+  const span = Math.max(0, last - first);
+  // position along the track: by real time when the session spans time, else
+  // spread evenly by index (demo/legacy data where all events share a stamp).
+  const pos = (ts, i, n) => (span > 0 ? ((ts - first) / span) * 100 : n <= 1 ? 50 : (i / (n - 1)) * 100);
+
+  const dots = evs
+    .map(
+      (e, i) =>
+        `<button class="replay-dot k-${eventKind(e.name)}" style="left:${pos(e.ts, i, evs.length)}%" data-i="${i}" type="button" aria-label="${escapeHtml(
+          e.name
+        )}"></button>`
+    )
+    .join("");
+
+  const fbMarks = s.feedback
+    .map((f) => {
+      const clamped = Math.min(Math.max(f.ts, first), last);
+      return `<span class="replay-fb" style="left:${pos(clamped, 0, 1)}%" title="${escapeHtml(f.content)}">💬</span>`;
+    })
+    .join("");
+
+  const flags = s.flags.length
+    ? `<div class="detail-flags">${s.flags.map((f) => `<span class="flag-chip">${escapeHtml(f)}</span>`).join("")}</div>`
+    : "";
+
+  const fb = s.feedback.length
+    ? `<div class="detail-fb">${s.feedback
+        .map((f) => `<div class="fb-quote">💬 “${escapeHtml(f.content)}”</div>`)
+        .join("")}</div>`
+    : "";
+
+  // The list can be sorted ascending/descending by time; keep each row's
+  // original chronological index in data-i so hover still maps to the right dot.
+  const ordered = evs.map((e, i) => ({ e, i }));
+  if (state.replaySort === "desc") ordered.reverse();
+  const list = ordered
+    .map(({ e, i }) => {
+      const data = e.properties ? JSON.stringify(e.properties) : "";
+      return `<div class="replay-ev k-${eventKind(e.name)}" data-i="${i}">
+        <span class="re-time">${escapeHtml(fmtClock(e.ts))}</span>
+        <span class="re-dot"></span>
+        <span class="re-name">${escapeHtml(e.name)}</span>
+        <span class="re-data mono">${escapeHtml(data)}</span>
+      </div>`;
+    })
+    .join("");
+  const sortArrow = state.replaySort === "asc" ? "↑" : "↓";
+
+  host.innerHTML = `
+    <div class="detail-head">
+      <span class="badge player big" style="color:${color};border-color:${color}44">${escapeHtml(playerLabel(s.player_ref))}</span>
+      <div class="detail-meta">
+        <span class="outcome-pill ${oc.cls}">${oc.label}</span>
+        ${s.region ? `<span class="dm region">🌎 ${escapeHtml(s.region)}</span>` : ""}
+        <span class="dm" title="Server instance JobId">${escapeHtml(serverLabel(s.server_id))}</span>
+        <span class="dm">${escapeHtml(fmtDayTime(s.started_at))}</span>
+        <span class="dm">${escapeHtml(fmtDuration(s.duration))}</span>
+        <span class="dm">${s.deaths} death${s.deaths === 1 ? "" : "s"}</span>
+      </div>
+    </div>
+    ${flags}
+    ${fb}
+    <div class="replay">
+      <div class="replay-track">
+        <div class="replay-line"></div>
+        ${dots}
+        ${fbMarks}
+      </div>
+      <div class="replay-axis"><span>${escapeHtml(fmtClock(first))}</span><span>${escapeHtml(fmtClock(last))}</span></div>
+    </div>
+    <div class="replay-list">
+      <div class="replay-list-head">
+        <button class="rl-sort" id="replay-time-sort" type="button">Time <span class="sort-arrow">${sortArrow}</span></button>
+        <span></span>
+        <span>Event</span>
+        <span>Data</span>
+      </div>
+      ${list}
+    </div>
+    <div class="replay-tip hidden"></div>`;
+
+  const sortBtn = host.querySelector("#replay-time-sort");
+  if (sortBtn)
+    sortBtn.addEventListener("click", () => {
+      state.replaySort = state.replaySort === "asc" ? "desc" : "asc";
+      renderSessionDetail(s);
+    });
+
+  wireReplayHover(host, s);
+}
+
+// Link the timeline dots and the ordered event list: hovering either highlights
+// both and shows a tooltip with the exact event, time, and properties.
+function wireReplayHover(host, s) {
+  const tip = host.querySelector(".replay-tip");
+  const track = host.querySelector(".replay-track");
+  const dots = [...host.querySelectorAll(".replay-dot")]; // chronological order
+  const rows = [...host.querySelectorAll(".replay-ev")]; // may be reversed
+  const rowByIdx = new Map(rows.map((r) => [+r.dataset.i, r]));
+
+  const show = (i) => {
+    const e = s.events[i];
+    const dot = dots[i];
+    if (!e || !dot) return;
+    const data = e.properties ? JSON.stringify(e.properties) : "";
+    tip.innerHTML =
+      `<span class="tip-name k-${eventKind(e.name)}">${escapeHtml(e.name)}</span>` +
+      `<span class="tip-date">${escapeHtml(fmtClock(e.ts))}</span>` +
+      (data ? `<span class="tip-data mono">${escapeHtml(data)}</span>` : "");
+    const hostRect = host.getBoundingClientRect();
+    const trackRect = track.getBoundingClientRect();
+    const dotRect = dot.getBoundingClientRect();
+    const cx = dotRect.left - hostRect.left + dotRect.width / 2;
+    tip.style.left = cx + "px";
+    tip.style.top = trackRect.top - hostRect.top + "px";
+    tip.classList.toggle("flip", cx > hostRect.width * 0.6);
+    tip.classList.remove("hidden");
+    dot.classList.add("hot");
+    rowByIdx.get(i)?.classList.add("hot");
+  };
+  const hide = (i) => {
+    tip.classList.add("hidden");
+    dots[i]?.classList.remove("hot");
+    rowByIdx.get(i)?.classList.remove("hot");
+  };
+
+  dots.forEach((d, i) => {
+    d.addEventListener("mouseenter", () => show(i));
+    d.addEventListener("mouseleave", () => hide(i));
+    d.addEventListener("focus", () => show(i));
+    d.addEventListener("blur", () => hide(i));
+  });
+  rows.forEach((r) => {
+    const i = +r.dataset.i;
+    r.addEventListener("mouseenter", () => show(i));
+    r.addEventListener("mouseleave", () => hide(i));
+  });
 }
 
 // ---------- connection panel ----------
