@@ -13,7 +13,9 @@
 //     event shapes without a schema migration.
 //   - Two timestamps on events (client_ts + server_ts): never trust the
 //     client's clock. Keep what the client CLAIMS and what our server OBSERVED.
-//   - `player_ref` is an anonymized salted hash, never a raw Roblox UserId.
+//   - `player_ref` is a PSEUDONYMOUS per-game hash, never a raw Roblox UserId.
+//     Pseudonymous, not anonymous: it's deterministic (that's what makes
+//     session grouping and RTBF possible), so it is still personal data.
 //   - A batch is applied all-or-nothing: rows are staged, then committed and
 //     persisted in one step, so a game never sees half a batch.
 
@@ -38,8 +40,19 @@ function persist() {
 const uuid = () => crypto.randomUUID();
 const now = () => Date.now();
 
-// Anonymize a player identifier before it is ever stored. Per-game salt means
-// the same player can't be correlated across different games.
+// Derive a PSEUDONYMOUS player reference before anything is stored, so the raw
+// Roblox UserId is never persisted. Namespacing by gameId means the same player
+// hashes differently per game, which prevents cross-game correlation.
+//
+// This is pseudonymization, NOT anonymization, and the privacy policy says so:
+//   - it is deterministic, which is exactly what lets us group a player's
+//     sessions and honor an RTBF delete;
+//   - gameId is a namespace, not a secret key — it lives in this same DB — so
+//     anyone with the DB plus a candidate UserId can confirm a match by
+//     recomputing the digest. Roblox UserIds are a bounded numeric space.
+// Treat player_ref (and everything joined to it) as personal data.
+// If you ever need real unlinkability, key this with a secret pepper held
+// outside the DB and rotate it — but that breaks RTBF-by-player_ref.
 export function hashPlayer(gameId, rawId) {
   return crypto
     .createHash("sha256")
@@ -62,6 +75,25 @@ export const users = {
   },
   byEmail: (email) => data.users.find((u) => u.email === email),
   byId: (id) => data.users.find((u) => u.id === id),
+  // Read-only snapshot for admin/reporting use (e.g. counting signups). Never
+  // hand out password_hash — callers only get id/email/oauth/created_at.
+  all: () =>
+    data.users.map((u) => ({
+      id: u.id,
+      email: u.email,
+      created_at: u.created_at,
+      oauth: u.oauth ? Object.keys(u.oauth) : [],
+    })),
+  // Stamp the moment the user accepted the current privacy policy. Idempotent —
+  // re-accepting overwrites (useful if the policy version bumps and you want a
+  // fresh stamp). Returns the updated user or null if not found.
+  acceptPrivacy(id) {
+    const user = data.users.find((u) => u.id === id);
+    if (!user) return null;
+    user.privacy_accepted_at = now();
+    persist();
+    return user;
+  },
   // Delete a user and cascade-delete every game (and each game's sessions,
   // events, and feedback) they own. Used by the demo cleanup path to nuke the
   // legacy shared account, and future account-deletion flows can reuse it.
@@ -69,13 +101,21 @@ export const users = {
     const before = data.users.length;
     data.users = data.users.filter((u) => u.id !== userId);
     if (data.users.length === before) return false;
-    const gameIds = data.games.filter((g) => g.user_id === userId).map((g) => g.id);
-    if (gameIds.length) {
-      const gameSet = new Set(gameIds);
+    // Cascade: delete every game the user OWNED (and its telemetry), and
+    // strip their MEMBERSHIP from any games owned by someone else — so a
+    // deleted user doesn't linger as a phantom teammate.
+    const ownedGameIds = data.games.filter((g) => g.user_id === userId).map((g) => g.id);
+    if (ownedGameIds.length) {
+      const gameSet = new Set(ownedGameIds);
       data.games = data.games.filter((g) => !gameSet.has(g.id));
       data.sessions = data.sessions.filter((s) => !gameSet.has(s.game_id));
       data.events = data.events.filter((e) => !gameSet.has(e.game_id));
       data.feedback = data.feedback.filter((f) => !gameSet.has(f.game_id));
+    }
+    for (const game of data.games) {
+      if (game.members?.some((m) => m.user_id === userId)) {
+        game.members = game.members.filter((m) => m.user_id !== userId);
+      }
     }
     persist();
     return true;
@@ -95,6 +135,11 @@ export const users = {
 };
 
 // ---- games ----
+// A game has one OWNER (`user_id`) and any number of MEMBERS (`members`, each
+// {user_id, added_at}). Members share the dashboard and the API key with the
+// owner — enough for two teammates to see the same telemetry — but only the
+// owner can delete the game or manage the team. The owner is not duplicated
+// in the members list.
 export const games = {
   create(userId, name) {
     const game = {
@@ -102,16 +147,47 @@ export const games = {
       user_id: userId,
       name,
       api_key: newApiKey(),
+      members: [],
       created_at: now(),
     };
     data.games.push(game);
     persist();
     return game;
   },
+  isOwner: (game, userId) => !!game && game.user_id === userId,
+  hasAccess: (game, userId) =>
+    !!game && (game.user_id === userId || (game.members || []).some((m) => m.user_id === userId)),
   byUser: (userId) =>
-    data.games.filter((g) => g.user_id === userId).sort((a, b) => b.created_at - a.created_at),
+    data.games
+      .filter((g) => g.user_id === userId || (g.members || []).some((m) => m.user_id === userId))
+      .sort((a, b) => b.created_at - a.created_at),
   byKey: (key) => data.games.find((g) => g.api_key === key),
-  byIdForUser: (id, userId) => data.games.find((g) => g.id === id && g.user_id === userId),
+  // Any linked user (owner or member) can pull the game; downstream routes
+  // gate destructive actions with isOwner() where required.
+  byIdForUser: (id, userId) => {
+    const game = data.games.find((g) => g.id === id);
+    return game && games.hasAccess(game, userId) ? game : null;
+  },
+  addMember(gameId, userId) {
+    const game = data.games.find((g) => g.id === gameId);
+    if (!game) return null;
+    game.members = game.members || [];
+    if (game.user_id === userId || game.members.some((m) => m.user_id === userId)) {
+      return game; // idempotent — already on the team
+    }
+    game.members.push({ user_id: userId, added_at: now() });
+    persist();
+    return game;
+  },
+  removeMember(gameId, userId) {
+    const game = data.games.find((g) => g.id === gameId);
+    if (!game) return null;
+    const before = (game.members || []).length;
+    game.members = (game.members || []).filter((m) => m.user_id !== userId);
+    if (game.members.length !== before) persist();
+    return game;
+  },
+  membersFor: (game) => (game && game.members) || [],
   rotateKey(id) {
     const game = data.games.find((g) => g.id === id);
     if (!game) return null;
@@ -137,6 +213,33 @@ export const games = {
     data.feedback = data.feedback.filter((f) => f.game_id !== id);
     persist();
     return true;
+  },
+};
+
+// ---- players (RTBF) ----
+export const players = {
+  // Right-to-be-forgotten: wipe every trace of one player from one game.
+  // Deletes their sessions, all events under those sessions, and all feedback
+  // tied to their player_ref. Scoped to a single game so a leaked SDK key can
+  // only ever affect data that key was already authorized for.
+  remove(gameId, playerRef) {
+    const sessionIds = new Set(
+      data.sessions.filter((s) => s.game_id === gameId && s.player_ref === playerRef).map((s) => s.id)
+    );
+    const before = {
+      sessions: data.sessions.length,
+      events: data.events.length,
+      feedback: data.feedback.length,
+    };
+    data.sessions = data.sessions.filter((s) => !(s.game_id === gameId && s.player_ref === playerRef));
+    data.events = data.events.filter((e) => !(e.game_id === gameId && sessionIds.has(e.session_id)));
+    data.feedback = data.feedback.filter((f) => !(f.game_id === gameId && f.player_ref === playerRef));
+    persist();
+    return {
+      sessions: before.sessions - data.sessions.length,
+      events: before.events - data.events.length,
+      feedback: before.feedback - data.feedback.length,
+    };
   },
 };
 

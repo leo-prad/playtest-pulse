@@ -16,7 +16,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { users, games, ingest, stats } from "./db.js";
+import { users, games, ingest, stats, players } from "./db.js";
 import { hashPassword, verifyPassword, signToken, requireAuth } from "./auth.js";
 import { summarizeFeedback } from "./summarize.js";
 
@@ -219,6 +219,10 @@ app.post("/api/auth/demo", demoLimiter, async (req, res) => {
   const email = `demo-${suffix}@playtestpulse.dev`;
   const password = crypto.randomBytes(24).toString("hex");
   const user = users.create(email, await hashPassword(password));
+  // Demo users auto-accept the privacy policy so the one-click sandbox stays
+  // frictionless — they never see the modal. A real signup still has to
+  // read + accept.
+  users.acceptPrivacy(user.id);
   try {
     seedDemoWorkspace(user.id);
   } catch (err) {
@@ -234,6 +238,46 @@ app.post("/api/auth/login", async (req, res) => {
   if (!user || !(await verifyPassword(password || "", user.password_hash)))
     return res.status(401).json({ error: "Email or password is incorrect." });
   res.json({ token: signToken(user), email: user.email });
+});
+
+// ------------------------------------------------------- admin (temporary)
+// Quick way to check real signup counts without shelling into Render or
+// hand-parsing the JSON store. Gated behind ADMIN_SECRET so it's dark unless
+// you set that env var — leave it unset (or delete this route) once you're
+// done checking. Never returns password hashes; see users.all() in db.js.
+const DEMO_EMAIL_RE = /^demo(-[0-9a-f]+)?@playtestpulse\.dev$/i;
+
+app.get("/api/admin/user-count", (req, res) => {
+  const secret = process.env.ADMIN_SECRET;
+  if (!secret || req.headers["x-admin-secret"] !== secret) {
+    return res.status(404).json({ error: "Not found." }); // no hint this route exists
+  }
+  const all = users.all();
+  const demoCount = all.filter((u) => DEMO_EMAIL_RE.test(u.email)).length;
+  res.json({
+    totalUsers: all.length,
+    realSignups: all.length - demoCount,
+    demoSandboxes: demoCount,
+    oauthUsers: all.filter((u) => u.oauth.length > 0).length,
+    passwordUsers: all.filter((u) => u.oauth.length === 0).length,
+  });
+});
+
+// Lightweight "who am I" — used by the client on boot to decide whether to
+// show the privacy-acceptance modal, without leaking the password hash.
+app.get("/api/auth/me", requireAuth, (req, res) => {
+  const user = users.byId(req.user.id);
+  if (!user) return res.status(404).json({ error: "User not found." });
+  res.json({ id: user.id, email: user.email, privacy_accepted_at: user.privacy_accepted_at || null });
+});
+
+// Records that this signed-in user has accepted the current privacy policy.
+// Client calls this from the acceptance modal; once stamped, the modal never
+// appears again for this account on any device.
+app.post("/api/auth/accept-privacy", requireAuth, (req, res) => {
+  const user = users.acceptPrivacy(req.user.id);
+  if (!user) return res.status(404).json({ error: "User not found." });
+  res.json({ ok: true, privacy_accepted_at: user.privacy_accepted_at });
 });
 
 // ---------------------------------------------------------------- games
@@ -258,7 +302,62 @@ app.patch("/api/games/:id", requireAuth, (req, res) => {
 app.delete("/api/games/:id", requireAuth, (req, res) => {
   const game = games.byIdForUser(req.params.id, req.user.id);
   if (!game) return res.status(404).json({ error: "Game not found." });
+  if (!games.isOwner(game, req.user.id))
+    return res.status(403).json({ error: "Only the game's owner can delete it." });
   games.remove(game.id);
+  res.json({ ok: true });
+});
+
+// ---- team members ----
+// Return the roster with the owner tagged, and hydrate each row with email so
+// the UI can list a human-readable name without exposing internal user IDs
+// beyond that.
+app.get("/api/games/:id/members", requireAuth, (req, res) => {
+  const game = games.byIdForUser(req.params.id, req.user.id);
+  if (!game) return res.status(404).json({ error: "Game not found." });
+  const owner = users.byId(game.user_id);
+  const memberRows = (game.members || [])
+    .map((m) => {
+      const u = users.byId(m.user_id);
+      return u ? { user_id: u.id, email: u.email, added_at: m.added_at, role: "member" } : null;
+    })
+    .filter(Boolean);
+  res.json({
+    owner: owner ? { user_id: owner.id, email: owner.email, role: "owner" } : null,
+    members: memberRows,
+    is_owner: games.isOwner(game, req.user.id),
+  });
+});
+
+app.post("/api/games/:id/members", requireAuth, (req, res) => {
+  const game = games.byIdForUser(req.params.id, req.user.id);
+  if (!game) return res.status(404).json({ error: "Game not found." });
+  if (!games.isOwner(game, req.user.id))
+    return res.status(403).json({ error: "Only the owner can add teammates." });
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  if (!EMAIL_RE.test(email))
+    return res.status(400).json({ error: "Enter a valid email address." });
+  const invitee = users.byEmail(email);
+  if (!invitee)
+    return res.status(404).json({ error: "No account with that email. Ask them to sign up first." });
+  if (invitee.id === req.user.id)
+    return res.status(400).json({ error: "You're already the owner." });
+  games.addMember(game.id, invitee.id);
+  res.json({ ok: true, user_id: invitee.id, email: invitee.email });
+});
+
+app.delete("/api/games/:id/members/:userId", requireAuth, (req, res) => {
+  const game = games.byIdForUser(req.params.id, req.user.id);
+  if (!game) return res.status(404).json({ error: "Game not found." });
+  // A member can remove themselves (leave the game); only the owner can
+  // remove someone else. The owner can never be removed via this route —
+  // deleting the game is the only way to drop the owner from it.
+  const targetId = req.params.userId;
+  if (targetId === game.user_id)
+    return res.status(400).json({ error: "The owner can't be removed. Delete the game instead." });
+  if (targetId !== req.user.id && !games.isOwner(game, req.user.id))
+    return res.status(403).json({ error: "Only the owner can remove other members." });
+  games.removeMember(game.id, targetId);
   res.json({ ok: true });
 });
 
@@ -339,6 +438,19 @@ app.post("/ingest", ingestLimiter, checkApiKey, (req, res) => {
   } catch (err) {
     res.status(500).json({ error: "Could not store batch: " + err.message });
   }
+});
+
+// Right-to-be-forgotten. The game whose API key was presented can wipe any
+// one of its own players' data — sessions, every event on those sessions,
+// and every feedback comment. Scoped tight: the API key belongs to a single
+// game, so this can never delete another dev's data even if leaked. Returns
+// counts so the caller can log what it removed for their audit trail.
+app.delete("/player/:player_ref", ingestLimiter, checkApiKey, (req, res) => {
+  const playerRef = req.params.player_ref;
+  if (!/^[a-f0-9]{4,64}$/i.test(playerRef))
+    return res.status(400).json({ error: "player_ref must be the hashed reference (hex, 4–64 chars)." });
+  const removed = players.remove(req.game.id, playerRef);
+  res.json({ ok: true, player_ref: playerRef, removed });
 });
 
 // Combined per-server flush. One HTTP request carries every player's pending

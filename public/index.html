@@ -97,6 +97,22 @@
             <div id="events-chart" class="chart"></div>
           </div>
 
+          <div class="tile funnel-card overall-funnel-card">
+            <div class="tile-head">
+              <div>
+                <h3 class="funnel-title">Conversion Funnel <span class="live-flag">● live</span></h3>
+                <span class="funnel-subtitle">Stage progression and player retention</span>
+              </div>
+              <div class="funnel-cohort-badge" id="overall-funnel-cohort">Cohort: 160 players</div>
+            </div>
+            <div class="funnel-visualization" id="overall-funnel-chart-container">
+              <div class="funnel-canvas" id="overall-funnel-canvas">
+                <svg id="overall-funnel-svg" class="funnel-svg" preserveAspectRatio="none"></svg>
+                <div id="overall-funnel-stage-labels" class="funnel-stage-labels"></div>
+              </div>
+            </div>
+          </div>
+
           <div class="tile topevents">
             <div class="tile-head"><h3>Most fired events</h3></div>
             <ul id="top-events" class="bars"></ul>
@@ -262,6 +278,23 @@
             </div>
             <p class="hint">Paste both into <code>Telemetry.Configure</code> in your game.</p>
           </div>
+
+          <div class="tile teampanel">
+            <div class="tile-head">
+              <h3>Team</h3>
+              <span class="hint" id="team-role"></span>
+            </div>
+            <p class="hint" id="team-help">
+              Add a teammate&rsquo;s email to share this game&rsquo;s dashboard and API key.
+              They need an account already — ask them to sign up first.
+            </p>
+            <div class="team-invite hidden" id="team-invite">
+              <input id="team-email" class="filter-input" type="email" placeholder="teammate@example.com" />
+              <button id="team-add" class="btn primary tiny" type="button">Add</button>
+            </div>
+            <p id="team-error" class="error hidden"></p>
+            <ul id="team-list" class="team-list"></ul>
+          </div>
         </div>
       </div>
     </section>
@@ -271,6 +304,12 @@
   <div id="modal-backdrop" class="modal-backdrop hidden">
     <div class="modal" id="modal" role="dialog" aria-modal="true"></div>
   </div>
+
+  <footer class="site-footer">
+    <a href="/privacy.html" class="foot-link">Privacy</a>
+    <span class="foot-dot" aria-hidden="true">·</span>
+    <span class="foot-muted">Playtest Pulse</span>
+  </footer>
 
   <script src="app.js"></script>
 </body>

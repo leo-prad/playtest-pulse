@@ -286,9 +286,26 @@ body {
 #tab-events .events-chartcard { margin-bottom: 16px; }
 
 /* Connection tab: single comfortable-width card */
-#tab-connection .grid { grid-template-columns: minmax(0, 720px); }
+#tab-connection .grid { grid-template-columns: minmax(0, 520px); }
+.teampanel .tile-head h3 { color: var(--muted); }
+.team-invite { display: flex; gap: 8px; margin: 10px 0 4px; }
+.team-invite .filter-input { flex: 1; min-width: 0; }
+.team-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.team-row {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 12px; font-size: 13px;
+}
+.team-email { flex: 1; font-family: var(--mono); font-size: 12.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-pill { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; padding: 2px 8px; border-radius: 20px; }
+.team-pill.owner { background: rgba(255,179,56,0.16); color: var(--signal); }
+.team-pill.member { background: var(--border); color: var(--muted); }
+.team-remove { background: transparent; border: 1px solid var(--border); color: var(--muted); font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 6px; cursor: pointer; font-family: var(--sans); }
+.team-remove:hover { border-color: var(--high); color: var(--high); }
 .keyrow { display: flex; align-items: center; gap: 8px; width: 100%; }
-.keyrow .codeline { flex: 1; width: 100%; white-space: nowrap; overflow: visible; text-overflow: clip; }
+.keyrow .codeline { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.keyrow .btn { flex-shrink: 0; }
+#tab-overall .overall-funnel-card { grid-column: span 3; }
 
 /* ---------- dark calendar picker ---------- */
 input[type="date"] {
@@ -748,6 +765,69 @@ button.et-cell.sortable.active { color: var(--signal); }
 .modal-input:focus { outline: none; border-color: var(--signal); }
 .confirm-name { font-family: var(--mono); color: var(--signal); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Privacy-acceptance gate. Wider than a normal modal so the policy stays
+   readable, and its own scroll container so the user can't scroll the
+   background. The wrapper class also flags the backdrop as un-dismissable. */
+.privacy-backdrop .modal { max-width: 640px; padding: 24px; }
+.privacy-modal { display: flex; flex-direction: column; gap: 14px; max-height: min(80vh, 720px); }
+.privacy-body {
+  flex: 1; min-height: 200px; overflow-y: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 18px 20px; line-height: 1.6; font-size: 13.5px;
+  scroll-behavior: smooth;
+}
+.privacy-body h1 { display: none; }
+.privacy-body .legal-updated { display: none; }
+.privacy-body h2 { margin: 18px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--signal); }
+.privacy-body h2:first-child { margin-top: 0; }
+.privacy-body p, .privacy-body li { color: var(--text); font-size: 13.5px; }
+.privacy-body ul { padding-left: 20px; }
+.privacy-body li { margin: 4px 0; }
+.privacy-body code { font-family: var(--mono); font-size: 12px; color: var(--signal); background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+.privacy-body strong { color: var(--text); font-weight: 700; }
+.privacy-body .legal-back { display: none; }
+.privacy-body .legal-link { color: var(--signal); text-decoration: none; }
+.privacy-body .legal-link:hover { text-decoration: underline; }
+
+.privacy-check {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 12px 14px; background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 8px;
+  font-size: 13.5px; line-height: 1.4;
+  cursor: pointer; transition: border-color .12s ease, background .12s ease;
+}
+.privacy-check:has(input:disabled) { cursor: not-allowed; opacity: 0.55; }
+.privacy-check:has(input:not(:disabled)):hover { border-color: var(--signal-dim); }
+.privacy-check:has(input:checked) { border-color: var(--signal); background: rgba(255,179,56,0.06); }
+.privacy-check input { accent-color: var(--signal); margin-top: 2px; }
+
+/* ---------- site footer & legal pages ---------- */
+.site-footer {
+  display: flex; align-items: center; justify-content: center;
+  gap: 8px; padding: 22px 20px 30px;
+  font-size: 12px; color: var(--muted);
+}
+.foot-link { color: var(--muted); text-decoration: none; }
+.foot-link:hover { color: var(--signal); }
+.foot-dot { color: var(--border); }
+
+.legal-view { max-width: 720px; margin: 0 auto; padding: 40px 24px 80px; }
+.legal-card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 36px 32px; line-height: 1.65;
+}
+.legal-card h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -0.01em; }
+.legal-card h2 { margin: 28px 0 8px; font-size: 15px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--signal); }
+.legal-card p, .legal-card li { color: var(--text); font-size: 14.5px; }
+.legal-card ul { padding-left: 22px; }
+.legal-card li { margin: 6px 0; }
+.legal-card code { font-family: var(--mono); font-size: 13px; color: var(--signal); background: var(--panel-2); padding: 1px 6px; border-radius: 4px; }
+.legal-card strong { color: var(--text); font-weight: 700; }
+.legal-updated { color: var(--muted); font-size: 12px; margin: 0 0 20px; font-family: var(--mono); }
+.legal-link { color: var(--signal); text-decoration: none; }
+.legal-link:hover { text-decoration: underline; }
+.legal-back { margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--border); }
 
 .hidden { display: none !important; }
 

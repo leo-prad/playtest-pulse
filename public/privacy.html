@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — Playtest Pulse</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" style="text-decoration:none;color:inherit">
+      <span class="pulse-dot" aria-hidden="true"></span>
+      <span class="wordmark">PLAYTEST<span class="thin"> / </span>PULSE</span>
+    </a>
+  </header>
+
+  <main class="legal-view">
+    <article class="legal-card">
+      <h1>Privacy Policy</h1>
+      <p class="legal-updated">Last updated: 2026-08-06</p>
+
+      <h2>1. Introduction and defined terms</h2>
+      <p>
+        This Privacy Policy (&ldquo;<strong>Policy</strong>&rdquo;) explains how
+        <strong>Playtest Pulse</strong> (&ldquo;<strong>Playtest Pulse</strong>,&rdquo;
+        &ldquo;<strong>we</strong>,&rdquo; &ldquo;<strong>us</strong>,&rdquo; or
+        &ldquo;<strong>our</strong>&rdquo;) handles information in connection with our
+        playtest telemetry and feedback analytics service, comprising our hosted
+        dashboard, our HTTP API, and our Roblox Luau software development kit
+        (together, the &ldquo;<strong>Service</strong>&rdquo;).
+      </p>
+      <p>In this Policy:</p>
+      <ul>
+        <li>
+          &ldquo;<strong>Developer</strong>&rdquo; means the Roblox creator, studio, or
+          other person who registers an account with us and integrates the SDK
+          into their Roblox experience.
+        </li>
+        <li>
+          &ldquo;<strong>Player</strong>&rdquo; means an end user who plays a Roblox
+          experience that a Developer has instrumented with the SDK.
+        </li>
+        <li>
+          &ldquo;<strong>Player Telemetry</strong>&rdquo; means the data described in
+          Section 4, which a Developer transmits to us from their experience.
+        </li>
+        <li>
+          &ldquo;<strong>you</strong>&rdquo; means whichever of the above applies to you
+          in context.
+        </li>
+      </ul>
+      <p>
+        Playtest Pulse is an independent service. It is not affiliated with,
+        endorsed by, or sponsored by Roblox Corporation.
+      </p>
+
+      <h2>2. Our two roles: controller and processor</h2>
+      <p>
+        Our role under data protection law differs depending on whose data is
+        involved. This distinction determines who is accountable for what.
+      </p>
+      <ul>
+        <li>
+          <strong>Developer account data (Section 3) &mdash; we are the
+          controller.</strong> We decide what account information to collect and
+          why, and we are directly accountable to Developers for it.
+        </li>
+        <li>
+          <strong>Player Telemetry (Section 4) &mdash; we are a processor; the
+          Developer is the controller.</strong> The Developer alone decides which
+          events to record, what properties to attach, whether to offer a
+          free-text feedback prompt, what notice to give Players, and what legal
+          basis applies. We process Player Telemetry only to provide the Service
+          to that Developer, on their instructions. We do not determine the
+          purposes of that processing and we do not use Player Telemetry for our
+          own purposes.
+        </li>
+      </ul>
+      <p>
+        Consequently, a Player who wishes to exercise rights over Player
+        Telemetry should contact the Developer of the relevant experience.
+        Section 9 explains how those requests are fulfilled. Developers are
+        responsible for satisfying their own controller obligations, including
+        providing a privacy notice to their Players and obtaining any legally
+        required consent.
+      </p>
+
+      <h2>3. Developer account data (we are the controller)</h2>
+      <p>When a Developer registers or uses an account, we store:</p>
+      <ul>
+        <li><strong>Email address.</strong> Used to identify the account and to sign in.</li>
+        <li>
+          <strong>Password verifier.</strong> For email-and-password accounts, we
+          store a bcrypt hash of the chosen password (work factor 10). We do not
+          store the password itself and cannot recover it.
+        </li>
+        <li>
+          <strong>Federated sign-in identifiers.</strong> If a Developer signs in with
+          Google or GitHub, we store the provider name, the provider&rsquo;s
+          account identifier for that Developer, the display name the provider
+          returns, and the time the provider was linked. We request only the
+          profile and email scopes needed to create an account.
+        </li>
+        <li><strong>Account timestamps.</strong> Account creation time, and the time this Policy was accepted.</li>
+        <li>
+          <strong>Project records.</strong> For each game a Developer creates: the name
+          they give it, its creation time, and its API key.
+        </li>
+      </ul>
+      <p>
+        <strong>Legal bases (UK/EU GDPR).</strong> We process Developer account data to
+        perform our contract with the Developer (Article 6(1)(b)) and, for
+        security, abuse prevention, and service integrity, on the basis of our
+        legitimate interests (Article 6(1)(f)).
+      </p>
+
+      <h2>4. Player Telemetry (we are a processor)</h2>
+      <p>
+        The SDK runs on the Developer&rsquo;s Roblox servers and transmits the
+        following to our API. What is actually sent is determined by the
+        Developer&rsquo;s own instrumentation.
+      </p>
+
+      <h2>4.1 Pseudonymous player reference</h2>
+      <p>
+        We do not store a Player&rsquo;s Roblox user ID, username, or display
+        name. Instead, the SDK sends the Roblox user ID to our API, and our
+        server immediately derives a <strong>pseudonymous player reference</strong>
+        before the record is written: a SHA-256 digest of the game&rsquo;s
+        internal identifier concatenated with the Roblox user ID, truncated to
+        sixteen hexadecimal characters (64 bits). The raw Roblox user ID is not
+        persisted.
+      </p>
+      <p>
+        <strong>We describe this reference as pseudonymous, not anonymous, and the
+        distinction is deliberate.</strong> The derivation is deterministic: the same
+        Player in the same game always produces the same reference. That is what
+        allows the Service to group a Player&rsquo;s sessions together and to
+        honour deletion requests. It also means the reference is capable of
+        being linked back to an individual by someone who holds both the
+        game identifier and the Player&rsquo;s Roblox user ID &mdash; for
+        example, by computing candidate digests. The derivation is namespaced
+        per game rather than keyed with a secret value, so it should not be
+        relied upon as a one-way anonymisation measure. Accordingly, we treat
+        the player reference, and all records linked to it, as
+        <strong>personal data</strong> under the GDPR and as personal information
+        under applicable US state privacy laws, and we apply this Policy to it
+        in full.
+      </p>
+      <p>
+        Because the derivation is namespaced per game, the same Player produces
+        <em>different</em> references in different games, which prevents us from
+        correlating a Player across unrelated Developers&rsquo; experiences.
+      </p>
+
+      <h2>4.2 Gameplay events</h2>
+      <p>
+        Each event carries a name chosen by the Developer (truncated to 120
+        characters), an optional free-form <code>properties</code> object, and two
+        timestamps: the time the Developer&rsquo;s game server reported the event
+        occurred, and the time our server received it. We retain both because we
+        do not treat a client-supplied clock as authoritative.
+      </p>
+      <p>
+        <strong>The <code>properties</code> object is arbitrary and entirely
+        Developer-defined.</strong> We do not restrict, inspect, or validate its
+        contents, and its contents therefore depend wholly on the
+        Developer&rsquo;s instrumentation. It is the Developer&rsquo;s
+        responsibility not to place personal information, special category data
+        (GDPR Article 9), or precise location data into event properties. See
+        Section 6.
+      </p>
+
+      <h2>4.3 Free-text Player feedback</h2>
+      <p>
+        If the Developer implements an in-experience feedback prompt, the text a
+        Player submits is stored verbatim, truncated to 2,000 characters per
+        submission, together with the submitting Player&rsquo;s pseudonymous
+        reference and timestamps.
+      </p>
+      <p>
+        <strong>This is a free-text field and we cannot control what a Player types
+        into it.</strong> A Player may enter their real name, contact details, or
+        other personal information, whether or not the Developer invited it.
+        Developers who enable a feedback prompt are responsible for the notice,
+        moderation, and lawful basis for that collection, and should discourage
+        the submission of personal information in the prompt itself. This is
+        particularly important where the audience may include children; see
+        Section 7.
+      </p>
+
+      <h2>4.4 Session context</h2>
+      <p>
+        For each session we store a session identifier, the Roblox server
+        instance identifier (<code>JobId</code>) reported by the SDK, or the literal
+        value <code>studio</code> where the session originated in Roblox Studio;
+        an optional region label supplied by the Developer (for example,
+        &ldquo;US East&rdquo;) which is a Developer-provided label and not a
+        geolocation we derive; and session start and end times.
+      </p>
+
+      <h2>4.5 Information we do not collect</h2>
+      <ul>
+        <li>Roblox user IDs (see Section 4.1), usernames, or display names.</li>
+        <li>Roblox chat, voice, direct messages, friend lists, or social graph.</li>
+        <li>Payment, purchase, or Robux transaction data.</li>
+        <li>Passwords or credentials belonging to Players.</li>
+        <li>Advertising, cross-site tracking, or device fingerprinting identifiers.</li>
+        <li>Data from any experience other than the one that transmitted it.</li>
+      </ul>
+
+      <h2>5. Network and operational data</h2>
+      <p>
+        Our API applies rate limiting to protect the Service from abuse. This
+        involves processing the source IP address of incoming requests
+        transiently in server memory for the duration of the applicable rate
+        limit window. IP addresses are not written to our datastore and are not
+        associated with Player Telemetry records. Our hosting provider may
+        additionally maintain its own transport and access logs; see Section 8.
+      </p>
+
+      <h2>6. Developer responsibilities</h2>
+      <p>By integrating the SDK, the Developer agrees that they are responsible for:</p>
+      <ul>
+        <li>
+          <strong>Disclosure.</strong> Informing their Players that gameplay analytics
+          are collected and by whom, in accordance with applicable law and with
+          the Roblox Terms of Use, Roblox Community Standards, and Roblox
+          developer and monetisation policies then in force.
+        </li>
+        <li>
+          <strong>Lawful basis and consent.</strong> Establishing a valid legal basis for
+          the collection, and obtaining any consent required in the relevant
+          jurisdiction, including verifiable parental consent where that is
+          required for a child.
+        </li>
+        <li>
+          <strong>Data minimisation.</strong> Not transmitting personal information,
+          special category data, government identifiers, precise geolocation, or
+          credentials in event names, event properties, or session labels.
+        </li>
+        <li>
+          <strong>Compliance with Roblox rules.</strong> Ensuring that their use of the
+          SDK, of <code>HttpService</code>, and of any in-experience feedback prompt
+          complies with the Roblox Terms of Use and applicable Roblox policies,
+          including restrictions on soliciting personal information from users
+          and rules concerning off-platform data collection. Roblox&rsquo;s terms
+          govern the Developer&rsquo;s relationship with Roblox; nothing in this
+          Policy modifies them.
+        </li>
+        <li>
+          <strong>Responding to Players.</strong> Receiving Player requests and using the
+          mechanisms in Section 9 to fulfil them, or forwarding them to us.
+        </li>
+        <li>
+          <strong>API key custody.</strong> Keeping their per-game API key confidential
+          and rotating it if it is exposed. A key permits both writing telemetry
+          and deleting Player data for that one game.
+        </li>
+      </ul>
+
+      <h2>7. Children&rsquo;s privacy</h2>
+      <p>
+        <strong>The Roblox platform has a substantial number of users under the age
+        of 13, and we treat this as a serious risk area.</strong>
+      </p>
+      <p>
+        The Service is offered to Developers, not to Players, and our dashboard
+        is not directed to children. A Developer must be old enough to form a
+        binding contract in their jurisdiction to register an account.
+      </p>
+      <p>
+        We do not knowingly solicit or collect personal information directly
+        from children. We do not ask Players for their age, and by design we do
+        not receive a Player&rsquo;s Roblox user ID in retained form, name, or
+        contact details. However, because a Developer controls what is
+        transmitted &mdash; and because free-text feedback (Section 4.3) can
+        contain anything a Player types &mdash; a Developer whose experience is
+        directed to or likely to be used by children must:
+      </p>
+      <ul>
+        <li>
+          Comply with the US Children&rsquo;s Online Privacy Protection Act
+          (&ldquo;COPPA&rdquo;) and its rule, including any applicable verifiable
+          parental consent requirement, and with GDPR Article 8 and equivalent
+          local rules on children&rsquo;s consent;
+        </li>
+        <li>
+          Not enable a free-text feedback prompt for a child audience unless they
+          have a lawful basis to collect that text and are able to moderate it;
+        </li>
+        <li>Not transmit any personal information about a child to the Service.</li>
+      </ul>
+      <p>
+        If we become aware that we hold personal information that a Developer
+        collected from a child without a required consent, we will delete it and
+        may suspend the Developer&rsquo;s account. A parent, guardian, or
+        Developer may request such deletion using the contact details in Section
+        13, and we will act without undue delay.
+      </p>
+
+      <h2>8. Service providers and disclosures</h2>
+      <p>
+        We do not sell personal information. We do not share personal
+        information for cross-context behavioural advertising. We do not use
+        Player Telemetry to train machine learning models of our own. We
+        disclose information only as follows.
+      </p>
+      <ul>
+        <li>
+          <strong>Hosting.</strong> The Service runs on infrastructure operated by our
+          hosting provider, Render Services, Inc., which stores our application
+          data and may process it in the United States. Our hosting provider
+          also generates operational and access logs in the ordinary course of
+          providing the platform.
+        </li>
+        <li>
+          <strong>Feedback theme extraction (conditional).</strong> The dashboard offers an
+          optional feature that groups Player feedback into themes. When this
+          feature is enabled on our deployment, invoking it transmits up to the
+          100 most recent feedback entries for the selected game &mdash; as
+          verbatim Player-written text &mdash; to Anthropic PBC&rsquo;s API for
+          processing, and Anthropic processes it as our sub-processor in order to
+          return the result. Where the feature is not enabled, the same analysis
+          is performed locally on our own server by keyword frequency and
+          <em>no feedback text leaves our infrastructure</em>. Developers who
+          consider their feedback text sensitive should not enable a free-text
+          prompt.
+        </li>
+        <li>
+          <strong>Federated sign-in providers.</strong> If a Developer chooses to sign in
+          with Google or GitHub, that provider processes the sign-in under its
+          own privacy policy. This affects Developers only, never Players.
+        </li>
+        <li>
+          <strong>Legal and protective disclosures.</strong> We may disclose information
+          where we are required to do so by law, or where necessary to
+          investigate or prevent fraud, abuse, or threats to the security or
+          integrity of the Service or to the rights or safety of any person.
+        </li>
+        <li>
+          <strong>Business transfers.</strong> If we are involved in a merger,
+          acquisition, financing, or sale of assets, information may be
+          transferred as part of that transaction. We will give notice before
+          personal data becomes subject to a materially different privacy
+          policy.
+        </li>
+      </ul>
+      <p>
+        <strong>International transfers.</strong> Our infrastructure and service providers
+        are located in the United States. If you are in the United Kingdom, the
+        European Economic Area, or Switzerland, transfers of your personal data
+        to us or our sub-processors are made on the basis of appropriate
+        safeguards, which for our sub-processors means the European
+        Commission&rsquo;s Standard Contractual Clauses or an equivalent
+        mechanism. You may request further information using the contact details
+        in Section 13.
+      </p>
+
+      <h2>9. Data retention and deletion</h2>
+      <p>
+        <strong>We do not currently apply an automatic time-based expiry to Player
+        Telemetry.</strong> Telemetry remains associated with a Developer&rsquo;s game
+        for as long as that game exists on their account. Deletion happens when
+        it is triggered, as follows.
+      </p>
+      <ul>
+        <li>
+          <strong>Deleting a game.</strong> When a Developer deletes a game from their
+          dashboard, that game and all of its sessions, events, and feedback are
+          deleted from our active datastore in the same operation.
+        </li>
+        <li>
+          <strong>Deleting a Developer account.</strong> Deleting an account deletes every
+          game it owns and all associated sessions, events, and feedback in the
+          same operation.
+        </li>
+        <li>
+          <strong>Erasing one Player.</strong> A Developer may permanently erase a single
+          Player&rsquo;s data for one of their games by calling
+          <code>DELETE /player/:player_ref</code>, authenticated with that
+          game&rsquo;s API key. This removes that Player&rsquo;s sessions, every
+          event belonging to those sessions, and every feedback entry linked to
+          their pseudonymous reference, and returns a count of the records
+          removed. The operation is scoped to the single game the API key
+          belongs to.
+        </li>
+      </ul>
+      <p>
+        Deletion is immediate in our active datastore. Residual copies may
+        persist for a limited period in encrypted backups or in our hosting
+        provider&rsquo;s logs before being overwritten in the ordinary course.
+        We may retain the minimum information necessary to comply with a legal
+        obligation or to resolve a dispute.
+      </p>
+      <p>
+        Demonstration sandboxes created by the &ldquo;Try the demo&rdquo; feature
+        contain synthetic sample data only, contain no real Player data, and are
+        not currently purged on a fixed schedule.
+      </p>
+
+      <h2>10. Your rights</h2>
+      <p>
+        Depending on where you live, you may have some or all of the following
+        rights in relation to your personal data: to be informed; to access a
+        copy; to have inaccurate data corrected; to have data erased; to
+        restrict or object to processing; to data portability; to withdraw
+        consent where processing is based on consent; and not to be subject to a
+        decision based solely on automated processing. The Service does not
+        carry out automated decision-making or profiling that produces legal or
+        similarly significant effects.
+      </p>
+      <p>
+        If you are in California, you may also have the right to know what
+        personal information we collect and how it is used and disclosed, to
+        request deletion or correction, and to opt out of the sale or sharing of
+        personal information. As stated in Section 8, we do not sell or share
+        personal information. We will not discriminate against you for
+        exercising any right.
+      </p>
+      <p>
+        <strong>How to exercise a right.</strong> If you are a Developer, contact us using
+        Section 13. If you are a Player, please contact the Developer of the
+        experience you played, because they are the controller and, as explained
+        in Section 4.1, we hold only a pseudonymous reference and cannot on our
+        own identify which records relate to you. If you contact us directly, we
+        will refer your request to the relevant Developer where we can identify
+        them, and will assist them in fulfilling it.
+      </p>
+      <p>
+        If you are in the UK or EEA and consider that we have not handled your
+        personal data properly, you have the right to lodge a complaint with
+        your local supervisory authority. In the UK this is the Information
+        Commissioner&rsquo;s Office.
+      </p>
+
+      <h2>11. Security</h2>
+      <p>We maintain technical and organisational measures appropriate to the Service, including:</p>
+      <ul>
+        <li>Storing Developer passwords only as bcrypt hashes, never in plaintext or reversible form;</li>
+        <li>
+          Authenticating dashboard access with signed, expiring session tokens
+          that renew on activity and lapse after three days of inactivity;
+        </li>
+        <li>
+          Separating trust boundaries, so that a per-game API key can write
+          telemetry and erase Player data for that one game but cannot read any
+          dashboard, and a dashboard session cannot be used as an API key;
+        </li>
+        <li>Allowing Developers to rotate a per-game API key at any time;</li>
+        <li>Rate limiting and request size limits on public endpoints;</li>
+        <li>Transport encryption (HTTPS) for traffic to our hosted deployment;</li>
+        <li>Deriving the pseudonymous player reference server-side before any record is written, so the raw Roblox user ID is never persisted.</li>
+      </ul>
+      <p>
+        No method of transmission or storage is completely secure, and we cannot
+        guarantee absolute security. Developers materially affect the security of
+        their own Player Telemetry through their handling of their API key and
+        their choice of what to transmit.
+      </p>
+
+      <h2>12. Changes to this Policy</h2>
+      <p>
+        We may update this Policy from time to time. We will revise the
+        &ldquo;Last updated&rdquo; date above, and where changes are material we
+        will take additional steps to notify affected Developers and, where
+        required by law, seek renewed consent. Continued use of the Service
+        after an update takes effect constitutes acceptance of the revised
+        Policy, except where consent is legally required.
+      </p>
+
+      <h2>13. Contact</h2>
+      <p>
+        For privacy questions, to exercise a right, or to report a concern about
+        children&rsquo;s data, contact us at
+        <a href="mailto:hello@playtestpulse.dev" class="legal-link">hello@playtestpulse.dev</a>.
+        Please tell us whether you are a Developer or a Player and, if you are a
+        Player, which Roblox experience your request concerns, so that we can
+        route it to the correct controller.
+      </p>
+
+      <p class="legal-back">
+        <a href="/" class="legal-link">&larr; Back to Playtest Pulse</a>
+      </p>
+    </article>
+  </main>
+</body>
+</html>

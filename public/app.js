@@ -29,6 +29,7 @@ const state = {
   sessFilter: "all", // Sessions list filter: all | struggling | completed | feedback
   replaySort: "desc", // replay event list order: "desc" (newest first) | "asc"
   _sessSig: null, // change signature so polling doesn't needlessly redraw the list
+  me: null, // { id, email } of the signed-in user — used by the Team panel
 };
 
 const $ = (id) => document.getElementById(id);
@@ -1243,6 +1244,107 @@ function renderKeyPanel() {
   $("endpoint").textContent = window.location.origin;
   $("api-key").textContent = game.api_key;
   applyKeyBlur();
+  loadTeam();
+}
+
+async function loadTeam() {
+  const game = currentGame();
+  if (!game) return;
+  const err = $("team-error");
+  err.classList.add("hidden");
+  let data;
+  try {
+    data = await api(`/api/games/${game.id}/members`);
+  } catch (e) {
+    err.textContent = e.message;
+    err.classList.remove("hidden");
+    return;
+  }
+  const me = state.me || {};
+  $("team-role").textContent = data.is_owner ? "You are the owner" : `Owned by ${data.owner?.email || "—"}`;
+  $("team-invite").classList.toggle("hidden", !data.is_owner);
+  $("team-help").classList.toggle("hidden", !data.is_owner);
+
+  const rows = [];
+  if (data.owner) {
+    rows.push(`<li class="team-row">
+      <span class="team-email">${escapeHtml(data.owner.email)}</span>
+      <span class="team-pill owner">Owner</span>
+    </li>`);
+  }
+  for (const m of data.members) {
+    const canRemove = data.is_owner || m.user_id === me.id;
+    const removeBtn = canRemove
+      ? `<button class="team-remove" data-uid="${escapeHtml(m.user_id)}" type="button">${m.user_id === me.id ? "Leave" : "Remove"}</button>`
+      : "";
+    rows.push(`<li class="team-row">
+      <span class="team-email">${escapeHtml(m.email)}</span>
+      <span class="team-pill member">Member</span>
+      ${removeBtn}
+    </li>`);
+  }
+  $("team-list").innerHTML = rows.join("") || `<li class="stream-empty">Just you so far.</li>`;
+  $("team-list").querySelectorAll(".team-remove").forEach((btn) =>
+    btn.addEventListener("click", () => removeTeammate(btn.dataset.uid))
+  );
+}
+
+async function addTeammate() {
+  const game = currentGame();
+  if (!game) return;
+  const email = $("team-email").value.trim();
+  const err = $("team-error");
+  err.classList.add("hidden");
+  if (!email) return;
+  const btn = $("team-add");
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Adding…";
+  try {
+    await api(`/api/games/${game.id}/members`, { method: "POST", body: { email } });
+    $("team-email").value = "";
+    await loadTeam();
+  } catch (e) {
+    err.textContent = e.message;
+    err.classList.remove("hidden");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+async function removeTeammate(userId) {
+  const game = currentGame();
+  if (!game) return;
+  const leaving = state.me && userId === state.me.id;
+  const ok = await confirmModal(
+    leaving ? "Leave this game?" : "Remove teammate?",
+    leaving
+      ? "You'll lose access to this game's dashboard and API key. The owner can add you back later."
+      : "They'll lose access to this game's dashboard and API key. Existing telemetry stays.",
+    leaving ? "Leave" : "Remove",
+    true
+  );
+  if (!ok) return;
+  try {
+    await api(`/api/games/${game.id}/members/${userId}`, { method: "DELETE" });
+  } catch (e) {
+    await confirmModal("Couldn’t update team", e.message, "OK");
+    return;
+  }
+  if (leaving) {
+    // Left a game we don't own — bounce back to game list.
+    await loadGames();
+    if (state.games.length) {
+      selectGame(state.games[0].id);
+    } else {
+      if (state.pollTimer) clearInterval(state.pollTimer);
+      state.currentGameId = null;
+      show("empty-view");
+    }
+  } else {
+    await loadTeam();
+  }
 }
 
 function applyKeyBlur() {
@@ -1261,6 +1363,11 @@ $("copy-key").addEventListener("click", async () => {
   await navigator.clipboard.writeText(game.api_key);
   $("copy-key").textContent = "Copied";
   setTimeout(() => ($("copy-key").textContent = "Copy"), 1500);
+});
+
+$("team-add").addEventListener("click", addTeammate);
+$("team-email").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") addTeammate();
 });
 
 $("rotate-key").addEventListener("click", async () => {
@@ -1462,12 +1569,12 @@ async function loadFunnels() {
 }
 
 function renderFunnels(data) {
-  const cohortEl = $("funnel-cohort");
-  const svg = $("funnel-svg");
-  const labelsHost = $("funnel-stage-labels");
+  const cohortEls = [$("funnel-cohort"), $("overall-funnel-cohort")].filter(Boolean);
+  const svgs = [$("funnel-svg"), $("overall-funnel-svg")].filter(Boolean);
+  const labelsHosts = [$("funnel-stage-labels"), $("overall-funnel-stage-labels")].filter(Boolean);
   const cardsHost = $("funnel-cards-grid");
-  const canvas = $("funnel-canvas");
-  const chartWrap = $("funnel-chart-container");
+  const canvases = [$("funnel-canvas"), $("overall-funnel-canvas")].filter(Boolean);
+  const chartWraps = [$("funnel-chart-container"), $("overall-funnel-chart-container")].filter(Boolean);
   if (!data || !data.steps || data.steps.length === 0) return;
 
   if (data.range) {
@@ -1477,7 +1584,9 @@ function renderFunnels(data) {
 
   const steps = data.steps;
   const cohort = data.totalCohort || (steps.length ? steps[0].count : 1);
-  if (cohortEl) cohortEl.textContent = `Cohort: ${cohort} players`;
+  cohortEls.forEach((el) => {
+    el.textContent = `Cohort: ${cohort} players`;
+  });
 
   const numSteps = steps.length;
   const isScrollable = numSteps > 7;
@@ -1485,78 +1594,81 @@ function renderFunnels(data) {
   const totalWidth = numSteps * stepWidth;
   const height = 240;
 
-  if (chartWrap) {
-    chartWrap.style.width = "100%";
-    chartWrap.style.minWidth = "0px";
-  }
-  if (canvas) {
+  chartWraps.forEach((wrap) => {
+    wrap.style.width = "100%";
+    wrap.style.minWidth = "0px";
+  });
+  canvases.forEach((canvas) => {
     canvas.style.width = isScrollable ? `${totalWidth}px` : "100%";
     canvas.style.minWidth = isScrollable ? `${totalWidth}px` : "100%";
-  }
-
-  let svgPaths = `
-    <defs>
-      <linearGradient id="funnel-grad-primary" x1="0%" y1="0%" x2="100%" y2="0%">
-        <stop offset="0%" stop-color="#2d8a4e" stop-opacity="0.95" />
-        <stop offset="100%" stop-color="#4ade80" stop-opacity="0.75" />
-      </linearGradient>
-      <linearGradient id="funnel-grad-subsequent" x1="0%" y1="0%" x2="100%" y2="0%">
-        <stop offset="0%" stop-color="#4ade80" stop-opacity="0.55" />
-        <stop offset="100%" stop-color="#86efac" stop-opacity="0.25" />
-      </linearGradient>
-    </defs>
-  `;
-
-  steps.forEach((s, i) => {
-    const nextS = steps[i + 1];
-    const leftX = i * stepWidth;
-    const rightX = (i + 1) * stepWidth;
-
-    const leftRatio = Math.max(0.02, s.count / cohort);
-    const rightRatio = nextS ? Math.max(0.02, nextS.count / cohort) : leftRatio;
-
-    const leftH = height * leftRatio;
-    const rightH = height * rightRatio;
-
-    const leftTop = (height - leftH) / 2;
-    const leftBot = leftTop + leftH;
-    const rightTop = (height - rightH) / 2;
-    const rightBot = rightTop + rightH;
-
-    const points = `${leftX},${leftTop} ${rightX},${rightTop} ${rightX},${rightBot} ${leftX},${leftBot}`;
-    const fill = i === 0 ? "url(#funnel-grad-primary)" : "url(#funnel-grad-subsequent)";
-
-    const fbTipText = `${s.name}: ${s.count} (${s.pctTotal}% of cohort) · ${s.pctPrevious}% from previous step`;
-    svgPaths += `<polygon class="funnel-polygon" points="${points}" fill="${fill}" data-feedback="${escapeHtml(fbTipText)}" />`;
-
-    if (i < numSteps - 1) {
-      svgPaths += `<line x1="${rightX}" y1="0" x2="${rightX}" y2="${height}" stroke="rgba(255,255,255,0.14)" stroke-width="1.5" stroke-dasharray="3" />`;
-    }
   });
 
-  svgPaths += `<text x="24" y="${height / 2}" dominant-baseline="central" text-anchor="start" font-family="Inter, system-ui, sans-serif" font-size="54" font-weight="900" fill="#ffffff" style="filter: drop-shadow(0 4px 12px rgba(0,0,0,0.95)); pointer-events: none;">${cohort}</text>`;
+  svgs.forEach((svg) => {
+    const prefix = svg.id || "funnel";
+    let svgPaths = `
+      <defs>
+        <linearGradient id="${prefix}-grad-primary" x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stop-color="#2d8a4e" stop-opacity="0.95" />
+          <stop offset="100%" stop-color="#4ade80" stop-opacity="0.75" />
+        </linearGradient>
+        <linearGradient id="${prefix}-grad-subsequent" x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stop-color="#4ade80" stop-opacity="0.55" />
+          <stop offset="100%" stop-color="#86efac" stop-opacity="0.25" />
+        </linearGradient>
+      </defs>
+    `;
 
-  if (svg) {
+    steps.forEach((s, i) => {
+      const nextS = steps[i + 1];
+      const leftX = i * stepWidth;
+      const rightX = (i + 1) * stepWidth;
+
+      const leftRatio = Math.max(0.02, s.count / cohort);
+      const rightRatio = nextS ? Math.max(0.02, nextS.count / cohort) : leftRatio;
+
+      const leftH = height * leftRatio;
+      const rightH = height * rightRatio;
+
+      const leftTop = (height - leftH) / 2;
+      const leftBot = leftTop + leftH;
+      const rightTop = (height - rightH) / 2;
+      const rightBot = rightTop + rightH;
+
+      const points = `${leftX},${leftTop} ${rightX},${rightTop} ${rightX},${rightBot} ${leftX},${leftBot}`;
+      const fill = i === 0 ? `url(#${prefix}-grad-primary)` : `url(#${prefix}-grad-subsequent)`;
+
+      const fbTipText = `${s.name}: ${s.count} (${s.pctTotal}% of cohort) · ${s.pctPrevious}% from previous step`;
+      svgPaths += `<polygon class="funnel-polygon" points="${points}" fill="${fill}" data-feedback="${escapeHtml(fbTipText)}" />`;
+
+      if (i < numSteps - 1) {
+        svgPaths += `<line x1="${rightX}" y1="0" x2="${rightX}" y2="${height}" stroke="rgba(255,255,255,0.14)" stroke-width="1.5" stroke-dasharray="3" />`;
+      }
+    });
+
+    svgPaths += `<text x="24" y="${height / 2}" dominant-baseline="central" text-anchor="start" font-family="Inter, system-ui, sans-serif" font-size="54" font-weight="900" fill="#ffffff" style="filter: drop-shadow(0 4px 12px rgba(0,0,0,0.95)); pointer-events: none;">${cohort}</text>`;
+
     svg.setAttribute("viewBox", `0 0 ${totalWidth} ${height}`);
     svg.style.width = `${totalWidth}px`;
     svg.innerHTML = svgPaths;
-  }
+  });
 
-  if (labelsHost) {
-    labelsHost.style.width = `${totalWidth}px`;
-    labelsHost.innerHTML = steps
-      .map(
-        (s, i) => `<div class="funnel-stage-col ${i === 0 ? "is-first" : ""}" style="width: ${stepWidth}px;">
-          <div class="funnel-stage-top">
-            <span class="funnel-stage-name">${escapeHtml(s.name)}</span>
-          </div>
-          <div class="funnel-stage-bot">
-            ${i === 0 ? "" : `<span class="funnel-stage-pct">${s.pctPrevious}%</span><span class="funnel-stage-count">${s.count}</span>`}
-          </div>
-        </div>`
-      )
-      .join("");
-  }
+  const labelsMarkup = steps
+    .map(
+      (s, i) => `<div class="funnel-stage-col ${i === 0 ? "is-first" : ""}" style="width: ${stepWidth}px;">
+        <div class="funnel-stage-top">
+          <span class="funnel-stage-name">${escapeHtml(s.name)}</span>
+        </div>
+        <div class="funnel-stage-bot">
+          ${i === 0 ? "" : `<span class="funnel-stage-pct">${s.pctPrevious}%</span><span class="funnel-stage-count">${s.count}</span>`}
+        </div>
+      </div>`
+    )
+    .join("");
+
+  labelsHosts.forEach((host) => {
+    host.style.width = `${totalWidth}px`;
+    host.innerHTML = labelsMarkup;
+  });
 
   if (cardsHost) {
     cardsHost.innerHTML = steps
@@ -1597,10 +1709,17 @@ function closeModal() {
   modalEl.innerHTML = "";
 }
 backdrop.addEventListener("click", (e) => {
-  if (e.target === backdrop) closeModal();
+  // The privacy-acceptance modal is a hard gate — don't let a stray backdrop
+  // click dismiss it. Regular modals still close on outside click.
+  if (e.target === backdrop && !backdrop.classList.contains("privacy-backdrop")) closeModal();
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !backdrop.classList.contains("hidden")) closeModal();
+  if (
+    e.key === "Escape" &&
+    !backdrop.classList.contains("hidden") &&
+    !backdrop.classList.contains("privacy-backdrop")
+  )
+    closeModal();
 });
 
 function promptModal(title, label, placeholder, confirmText, initial = "") {
@@ -1647,6 +1766,91 @@ function confirmModal(title, message, confirmText, danger = false) {
     };
     $("modal-ok").addEventListener("click", () => done(true));
     $("modal-cancel").addEventListener("click", () => done(false));
+  });
+}
+
+// Privacy-policy acceptance gate. Fetches /privacy.html (single source of
+// truth) and inlines the .legal-card into a scrollable modal. The user must
+// scroll to the bottom before the checkbox enables, and check it before the
+// Continue button enables. Escape/backdrop-close are intentionally disabled —
+// this modal blocks entry to the app until acceptance is stamped server-side.
+async function privacyModal() {
+  let html = "";
+  try {
+    const res = await fetch("/privacy.html");
+    if (res.ok) {
+      const text = await res.text();
+      const doc = new DOMParser().parseFromString(text, "text/html");
+      html = doc.querySelector(".legal-card")?.innerHTML || "";
+    }
+  } catch {
+    /* fall back to link below */
+  }
+  if (!html) html = `<p>Please review our <a class="legal-link" href="/privacy.html" target="_blank">privacy policy</a>.</p>`;
+
+  modalEl.innerHTML = `
+    <div class="privacy-modal">
+      <h3 class="modal-title">Before you continue</h3>
+      <p class="modal-msg">Please read our privacy policy and confirm you understand what we collect and why. Scroll to the bottom to enable the checkbox.</p>
+      <div class="privacy-body" id="privacy-body">${html}</div>
+      <label class="privacy-check">
+        <input type="checkbox" id="privacy-check" disabled />
+        <span>I have read, understood, and agree to the Privacy Policy.</span>
+      </label>
+      <div class="modal-actions">
+        <button class="btn ghost" id="privacy-decline">Sign out</button>
+        <button class="btn primary" id="privacy-accept" disabled>Continue</button>
+      </div>
+    </div>`;
+  backdrop.classList.remove("hidden");
+  backdrop.classList.add("privacy-backdrop");
+
+  const body = $("privacy-body");
+  const check = $("privacy-check");
+  const accept = $("privacy-accept");
+  const decline = $("privacy-decline");
+
+  // Two thresholds. First: "scrolled to bottom" enables the checkbox. Use a
+  // 12px slack so people who overscroll by a pixel still count. Second: once
+  // it's ever been reached, keep it enabled — no yo-yo if they scroll back up.
+  let reachedBottom = false;
+  const onScroll = () => {
+    if (reachedBottom) return;
+    if (body.scrollTop + body.clientHeight >= body.scrollHeight - 12) {
+      reachedBottom = true;
+      check.disabled = false;
+    }
+  };
+  body.addEventListener("scroll", onScroll);
+  // If the content fits without scrolling, don't trap the user — enable now.
+  if (body.scrollHeight <= body.clientHeight + 12) {
+    reachedBottom = true;
+    check.disabled = false;
+  }
+
+  check.addEventListener("change", () => {
+    accept.disabled = !check.checked;
+  });
+
+  return new Promise((resolve) => {
+    const finish = (ok) => {
+      backdrop.classList.remove("privacy-backdrop");
+      closeModal();
+      resolve(ok);
+    };
+    accept.addEventListener("click", async () => {
+      accept.disabled = true;
+      accept.textContent = "Saving…";
+      try {
+        await api("/api/auth/accept-privacy", { method: "POST" });
+        finish(true);
+      } catch (e) {
+        accept.textContent = "Continue";
+        accept.disabled = false;
+        alert("Could not save your acceptance: " + e.message);
+      }
+    });
+    decline.addEventListener("click", () => finish(false));
   });
 }
 
@@ -1700,6 +1904,19 @@ function openDeleteModal(game) {
 // ---------- boot ----------
 async function enterApp() {
   try {
+    // Gate app entry on privacy-policy acceptance. Every login/signup/OAuth
+    // return path funnels through here, so the check runs exactly once per
+    // page load and blocks the dashboard until the user accepts.
+    const me = await api("/api/auth/me");
+    state.me = { id: me.id, email: me.email };
+    if (!me.privacy_accepted_at) {
+      const accepted = await privacyModal();
+      if (!accepted) {
+        clearSession();
+        show("auth-view");
+        return;
+      }
+    }
     await loadGames();
   } catch {
     clearSession();
